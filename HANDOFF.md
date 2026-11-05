@@ -3,9 +3,9 @@
 ## State
 
 Release 0.1 is implemented, and every acceptance criterion in `STATUS.md`
-has emulator evidence. The repository is not under version control yet (no
-git history was created). To keep history, run `git init` and make an initial
-commit.
+has emulator evidence. The repository is a local git repo on branch `main`
+(initial commit `aa35cbc`; no remote configured). `build/` and
+`third_party/` are ignored; `make` re-downloads and verifies Limine.
 
 ## Reproduce everything
 
