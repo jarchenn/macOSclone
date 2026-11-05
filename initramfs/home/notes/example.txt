@@ -1,0 +1,5 @@
+This is an example note.
+
+Edit it in Notes and press Ctrl+S to save. The saved text lives in
+RAM: you can read it back with `cat /home/notes/example.txt` in the
+Terminal, but it resets when Aurora restarts.

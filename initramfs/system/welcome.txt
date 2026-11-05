@@ -1,0 +1,7 @@
+Aurora is a small desktop operating system built from scratch for x86-64. Its kernel, drivers, window manager and apps all run inside QEMU on emulated hardware.
+
+Getting around:
+- Click an icon in the dock to open Terminal, Files, Notes or Settings.
+- Drag a window by its title bar. The red, amber and green buttons close, minimize and maximize it.
+- Ctrl+Tab switches windows. Click a dock icon to restore a minimized app.
+- Notes saves to /home/notes. Files and the Terminal (try: ls, cat, help) show the same files.

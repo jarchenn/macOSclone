@@ -1,0 +1,406 @@
+/* VFS core: namespace, path lookup, open-file table and dispatch to backends. */
+#include "fs/fs_internal.h"
+#include "fs/initramfs.h"
+#include "kalloc.h"
+#include "lib.h"
+
+struct open_file {
+    struct vfs_node *node;
+    uint32_t offset;
+    unsigned flags;
+    bool used;
+};
+
+static struct vfs_node *root;
+static struct vfs_node *home;
+static struct open_file files[VFS_MAX_OPEN];
+static uint32_t generation;
+
+uint32_t vfs_generation(void) { return generation; }
+
+const char *vfs_strerror(int err)
+{
+    switch (err) {
+    case VFS_OK: return "success";
+    case VFS_ENOENT: return "no such file or directory";
+    case VFS_EEXIST: return "file already exists";
+    case VFS_ENOTDIR: return "not a directory";
+    case VFS_EISDIR: return "is a directory";
+    case VFS_EROFS: return "read-only file system";
+    case VFS_ENOSPC: return "RAM storage is full";
+    case VFS_EINVAL: return "invalid path or argument";
+    case VFS_EBADF: return "bad file handle";
+    case VFS_ENAMETOOLONG: return "name too long";
+    case VFS_EMFILE: return "too many open files";
+    case VFS_ENOMEM: return "out of memory";
+    case VFS_EFBIG: return "file too large (64 KiB limit)";
+    case VFS_EBADARCHIVE: return "corrupt initramfs archive";
+    default: return "unknown error";
+    }
+}
+
+struct vfs_node *vfs_node_new(const char *name, uint8_t type, const struct fs_backend *fs)
+{
+    struct vfs_node *n = kzalloc(sizeof *n);
+    if (!n)
+        return NULL;
+    str_copy(n->name, name, sizeof n->name);
+    n->type = type;
+    n->fs = fs;
+    return n;
+}
+
+void vfs_node_attach(struct vfs_node *parent, struct vfs_node *child)
+{
+    child->parent = parent;
+    struct vfs_node **pp = &parent->children;
+    while (*pp && strcmp((*pp)->name, child->name) < 0)
+        pp = &(*pp)->next;
+    child->next = *pp;
+    *pp = child;
+}
+
+static void free_tree(struct vfs_node *n)
+{
+    while (n) {
+        struct vfs_node *next = n->next;
+        free_tree(n->children);
+        if (n->capacity && n->data)
+            kfree(n->data);
+        kfree(n);
+        n = next;
+    }
+}
+
+void vfs_init(void)
+{
+    if (root)
+        free_tree(root);
+    memset(files, 0, sizeof files);
+    ramfs_reset_usage();
+    root = vfs_node_new("", VFS_DIR, &initramfs_backend);
+    home = vfs_node_new("home", VFS_DIR, &ramfs_backend);
+    if (root && home)
+        vfs_node_attach(root, home);
+    generation++;
+}
+
+static struct vfs_node *child_named(struct vfs_node *dir, const char *name, size_t n)
+{
+    for (struct vfs_node *c = dir->children; c; c = c->next)
+        if (strlen(c->name) == n && memcmp(c->name, name, n) == 0)
+            return c;
+    return NULL;
+}
+
+/* Resolves a normalised absolute path. */
+static int lookup(const char *norm, struct vfs_node **out)
+{
+    if (!root)
+        return VFS_ENOENT;
+    struct vfs_node *n = root;
+    const char *p = norm;
+    while (*p) {
+        while (*p == '/')
+            p++;
+        if (!*p)
+            break;
+        const char *s = p;
+        while (*p && *p != '/')
+            p++;
+        if (n->type != VFS_DIR)
+            return VFS_ENOTDIR;
+        n = child_named(n, s, (size_t)(p - s));
+        if (!n)
+            return VFS_ENOENT;
+    }
+    *out = n;
+    return VFS_OK;
+}
+
+static int resolve(const char *path, struct vfs_node **out, char *norm_out)
+{
+    char norm[VFS_PATH_MAX + 1];
+    int r = vfs_normalize("/", path, norm, sizeof norm);
+    if (r)
+        return r;
+    if (norm_out)
+        str_copy(norm_out, norm, VFS_PATH_MAX + 1);
+    return lookup(norm, out);
+}
+
+/* Creates the final component of `path` with the given type. */
+static int create_node(const char *path, uint8_t type, struct vfs_node **out)
+{
+    char norm[VFS_PATH_MAX + 1], parent[VFS_PATH_MAX + 1], name[VFS_NAME_MAX + 1];
+    int r = vfs_normalize("/", path, norm, sizeof norm);
+    if (r)
+        return r;
+    struct vfs_node *existing;
+    if (lookup(norm, &existing) == VFS_OK)
+        return VFS_EEXIST;
+    r = vfs_split(norm, parent, sizeof parent, name, sizeof name);
+    if (r)
+        return r;
+    struct vfs_node *dir;
+    r = lookup(parent, &dir);
+    if (r)
+        return r;
+    if (dir->type != VFS_DIR)
+        return VFS_ENOTDIR;
+    r = dir->fs->create(dir, name, type, out);
+    if (r == VFS_OK)
+        generation++;
+    return r;
+}
+
+int vfs_mkdir(const char *path)
+{
+    struct vfs_node *n;
+    return create_node(path, VFS_DIR, &n);
+}
+
+int vfs_create(const char *path)
+{
+    struct vfs_node *n;
+    return create_node(path, VFS_FILE, &n);
+}
+
+int vfs_stat(const char *path, struct vfs_stat *st)
+{
+    struct vfs_node *n;
+    int r = resolve(path, &n, NULL);
+    if (r)
+        return r;
+    st->type = n->type;
+    st->readonly = n->fs->readonly;
+    st->size = n->type == VFS_FILE ? n->size : 0;
+    return VFS_OK;
+}
+
+int vfs_readdir(const char *path, uint32_t index, struct vfs_dirent *out)
+{
+    struct vfs_node *n;
+    int r = resolve(path, &n, NULL);
+    if (r)
+        return r;
+    if (n->type != VFS_DIR)
+        return VFS_ENOTDIR;
+    struct vfs_node *c = n->children;
+    for (uint32_t i = 0; c && i < index; i++)
+        c = c->next;
+    if (!c)
+        return VFS_ENOENT;
+    str_copy(out->name, c->name, sizeof out->name);
+    out->type = c->type;
+    out->readonly = c->fs->readonly;
+    out->size = c->type == VFS_FILE ? c->size : 0;
+    return VFS_OK;
+}
+
+int vfs_open(const char *path, unsigned flags)
+{
+    if (!(flags & (VFS_O_READ | VFS_O_WRITE)))
+        return VFS_EINVAL;
+    int slot = -1;
+    for (int i = 0; i < VFS_MAX_OPEN; i++)
+        if (!files[i].used) {
+            slot = i;
+            break;
+        }
+    if (slot < 0)
+        return VFS_EMFILE;
+    struct vfs_node *n;
+    int r = resolve(path, &n, NULL);
+    if (r == VFS_ENOENT && (flags & VFS_O_CREATE)) {
+        r = create_node(path, VFS_FILE, &n);
+    }
+    if (r)
+        return r;
+    if (n->type == VFS_DIR)
+        return VFS_EISDIR;
+    if ((flags & (VFS_O_WRITE | VFS_O_TRUNC)) && n->fs->readonly)
+        return VFS_EROFS;
+    if (flags & VFS_O_TRUNC) {
+        r = n->fs->truncate(n, 0);
+        if (r)
+            return r;
+        generation++;
+    }
+    files[slot] = (struct open_file){ .node = n, .offset = 0, .flags = flags, .used = true };
+    return slot;
+}
+
+static struct open_file *get_fd(int fd)
+{
+    if (fd < 0 || fd >= VFS_MAX_OPEN || !files[fd].used)
+        return NULL;
+    return &files[fd];
+}
+
+int vfs_close(int fd)
+{
+    struct open_file *f = get_fd(fd);
+    if (!f)
+        return VFS_EBADF;
+    f->used = false;
+    f->node = NULL;
+    return VFS_OK;
+}
+
+int vfs_read(int fd, void *buf, size_t n)
+{
+    struct open_file *f = get_fd(fd);
+    if (!f || !(f->flags & VFS_O_READ))
+        return VFS_EBADF;
+    struct vfs_node *node = f->node;
+    if (f->offset >= node->size)
+        return 0;
+    size_t avail = node->size - f->offset;
+    if (n > avail)
+        n = avail;
+    if (n > INT32_MAX)
+        n = INT32_MAX;
+    memcpy(buf, node->data + f->offset, n);
+    f->offset += (uint32_t)n;
+    return (int)n;
+}
+
+int vfs_write(int fd, const void *buf, size_t n)
+{
+    struct open_file *f = get_fd(fd);
+    if (!f || !(f->flags & VFS_O_WRITE))
+        return VFS_EBADF;
+    if (n > RAMFS_MAX_FILE)
+        return VFS_EFBIG;
+    int r = f->node->fs->write(f->node, f->offset, buf, (uint32_t)n);
+    if (r)
+        return r;
+    f->offset += (uint32_t)n;
+    generation++;
+    return (int)n;
+}
+
+int vfs_seek(int fd, uint32_t offset)
+{
+    struct open_file *f = get_fd(fd);
+    if (!f)
+        return VFS_EBADF;
+    f->offset = offset;
+    return VFS_OK;
+}
+
+int vfs_truncate(const char *path, uint32_t size)
+{
+    struct vfs_node *n;
+    int r = resolve(path, &n, NULL);
+    if (r)
+        return r;
+    if (n->type == VFS_DIR)
+        return VFS_EISDIR;
+    r = n->fs->truncate(n, size);
+    if (r == VFS_OK)
+        generation++;
+    return r;
+}
+
+int vfs_read_file(const char *path, void *buf, size_t cap, size_t *len)
+{
+    struct vfs_node *n;
+    int r = resolve(path, &n, NULL);
+    if (r)
+        return r;
+    if (n->type == VFS_DIR)
+        return VFS_EISDIR;
+    if (n->size > cap)
+        return VFS_EFBIG;
+    memcpy(buf, n->data, n->size);
+    *len = n->size;
+    return VFS_OK;
+}
+
+int vfs_write_file(const char *path, const void *data, size_t len)
+{
+    if (len > RAMFS_MAX_FILE)
+        return VFS_EFBIG;
+    struct vfs_node *n;
+    int r = resolve(path, &n, NULL);
+    if (r == VFS_ENOENT) {
+        r = create_node(path, VFS_FILE, &n);
+        if (r)
+            return r;
+        r = n->fs->replace(n, data, (uint32_t)len);
+        generation++;
+        return r;
+    }
+    if (r)
+        return r;
+    if (n->type == VFS_DIR)
+        return VFS_EISDIR;
+    r = n->fs->replace(n, data, (uint32_t)len);
+    if (r == VFS_OK)
+        generation++;
+    return r;
+}
+
+void vfs_usage(struct vfs_usage *u)
+{
+    u->ram_bytes = ramfs_bytes_used();
+    u->ram_nodes = ramfs_nodes_used();
+    u->open_files = 0;
+    for (int i = 0; i < VFS_MAX_OPEN; i++)
+        if (files[i].used)
+            u->open_files++;
+}
+
+/* ---- initramfs loading --------------------------------------------------- */
+
+static int load_entry(void *ctx, uint32_t type, const char *path, const uint8_t *data, uint64_t len)
+{
+    UNUSED(ctx);
+    char abs[VFS_PATH_MAX + 2];
+    abs[0] = '/';
+    str_copy(abs + 1, path, sizeof abs - 1);
+    bool to_home = str_starts_with(path, "home/") || strcmp(path, "home") == 0;
+    if (strcmp(path, "home") == 0)
+        return VFS_OK; /* /home already exists (RAM fs) */
+    if (to_home) {
+        /* Seed the writable RAM filesystem with a copy. */
+        if (type == VFS_DIR) {
+            int r = vfs_mkdir(abs);
+            return r == VFS_EEXIST ? VFS_OK : r;
+        }
+        return vfs_write_file(abs, data, (size_t)len);
+    }
+    /* Read-only node pointing into the archive. */
+    char parent[VFS_PATH_MAX + 1], name[VFS_NAME_MAX + 1];
+    int r = vfs_split(abs, parent, sizeof parent, name, sizeof name);
+    if (r)
+        return r;
+    struct vfs_node *dir, *existing;
+    r = lookup(parent, &dir);
+    if (r)
+        return VFS_EBADARCHIVE; /* parents must precede children */
+    if (dir->type != VFS_DIR || dir->fs != &initramfs_backend)
+        return VFS_EBADARCHIVE;
+    if (lookup(abs, &existing) == VFS_OK)
+        return VFS_EBADARCHIVE; /* duplicate entry */
+    struct vfs_node *n = vfs_node_new(name, (uint8_t)type, &initramfs_backend);
+    if (!n)
+        return VFS_ENOMEM;
+    if (type == VFS_FILE) {
+        if (len > UINT32_MAX)
+            return VFS_EBADARCHIVE;
+        n->data = (uint8_t *)data;
+        n->size = (uint32_t)len;
+    }
+    vfs_node_attach(dir, n);
+    return VFS_OK;
+}
+
+int vfs_load_initramfs(const uint8_t *data, size_t size)
+{
+    int r = initramfs_parse(data, size, load_entry, NULL);
+    generation++;
+    return r;
+}
