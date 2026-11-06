@@ -102,7 +102,8 @@ def ovmf():
 
 
 def qemu_command(image, vars_copy, memory="256M", firmware="uefi", serial=None,
-                 qmp=None, display=None, extra=None, no_reboot=True, gdb=False):
+                 qmp=None, display=None, extra=None, no_reboot=True, gdb=False,
+                 data_disk=None, network=None):
     """Build the reference QEMU command line as a list of arguments."""
     cmd = [require("qemu-system-x86_64", qemu()),
            "-machine", "pc",
@@ -110,8 +111,18 @@ def qemu_command(image, vars_copy, memory="256M", firmware="uefi", serial=None,
            "-smp", "1",
            "-m", memory,
            "-vga", "std",
-           "-drive", f"file={image},format=raw,if=ide,index=0,media=disk",
-           "-net", "none"]
+           "-drive", f"file={image},format=raw,if=ide,index=0,media=disk"]
+    if data_disk:
+        # Persistent /home: a raw image on a legacy-capable virtio-blk device.
+        cmd += ["-drive", f"file={data_disk},format=raw,if=none,id=data,cache=writeback",
+                "-device", "virtio-blk-pci,drive=data"]
+    if network:
+        # User-mode networking (slirp): guest 10.0.2.15, gateway/host 10.0.2.2,
+        # DNS 10.0.2.3. `network` may carry extra netdev options.
+        opts = "" if network is True else "," + network
+        cmd += ["-netdev", f"user,id=n0{opts}", "-device", "virtio-net-pci,netdev=n0"]
+    else:
+        cmd += ["-nic", "none"]
     if firmware == "uefi":
         code, _ = ovmf()
         require("ovmf", code)

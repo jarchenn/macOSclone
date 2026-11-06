@@ -128,6 +128,8 @@ static void cmd_help(void)
         "  touch <path>         create an empty file",
         "  write <path> <text>  replace a file's content",
         "  mkdir <path>         create a directory",
+        "  rm <path> / mv <a> <b>  delete / rename or move",
+        "  sync / df            flush the data disk / show storage use",
         "  cd [path] / pwd      change / show the current directory",
         "  open <app|path>      terminal, files, notes, settings, about, or a path",
         "  theme <light|dark>   switch the desktop theme",
@@ -151,8 +153,9 @@ static void cmd_about(void)
          g_boot.bootloader_version, (unsigned long long)g_boot.base_revision);
     outf(C_TEXT, "Firmware:     %s", app_firmware_name());
     outf(C_TEXT, "Display:      %ux%u, %u bpp software framebuffer", g_fb.width, g_fb.height, g_fb.bpp);
-    out_color(C_DIM, "Apps are built into a single-address-space kernel; they are not");
-    out_color(C_DIM, "isolated processes. Files in /home live in RAM and reset on restart.");
+    out_color(C_DIM, "Desktop apps run inside the kernel; programs in /system/bin run as");
+    out_color(C_DIM, "isolated ring-3 processes (try: run hello).");
+    out_color(C_DIM, app_storage_note());
 }
 
 static void cmd_uptime(void)
@@ -178,7 +181,15 @@ static void cmd_mem(void)
     outf(C_TEXT, "Kernel heap mapped:     %zu KiB of %zu KiB limit", hs.mapped_bytes / 1024, hs.limit_bytes / 1024);
     outf(C_TEXT, "Kernel heap in use:     %zu KiB in %zu allocations (peak %zu KiB)", hs.used_bytes / 1024,
          hs.alloc_count, hs.peak_used_bytes / 1024);
-    outf(C_TEXT, "RAM files (/home):      %u bytes reserved in %u nodes", u.ram_bytes, u.ram_nodes);
+    outf(C_TEXT, "Files (/home):          %u bytes cached in RAM in %u nodes", u.ram_bytes, u.ram_nodes);
+    struct vfs_storage stg;
+    vfs_storage(&stg);
+    if (stg.persistent)
+        outf(C_TEXT, "Data disk:              %u of %u KiB used, generation %llu, %llu commits",
+             stg.used_blocks * 4, stg.total_blocks * 4, (unsigned long long)stg.generation,
+             (unsigned long long)stg.commits);
+    else
+        outf(C_TEXT, "Data disk:              none (files in /home reset on restart)");
     uint32_t ev_drop, ev_coal;
     desktop_input_stats(&ev_drop, &ev_coal);
     outf(C_TEXT, "Input drops:            kbd %u, mouse %u, events %u (%u coalesced)",
@@ -556,6 +567,73 @@ static void execute(const char *line)
     else if (!strcmp(c, "open")) cmd_open(cl.argc, cl.argv);
     else if (!strcmp(c, "theme")) cmd_theme(cl.argc, cl.argv);
 #ifdef AURORA_TEST
+    /* Test-build only: rewrite /home/stress/f0..f7 for N rounds; every file
+     * carries its own CRC so a later check can detect torn or mixed data. */
+    else if (!strcmp(c, "pfsstress") && cl.argc == 2) {
+        long rounds = 0;
+        for (const char *q = cl.argv[1]; *q >= '0' && *q <= '9'; q++)
+            rounds = rounds * 10 + (*q - '0');
+        vfs_mkdir("/home/stress");
+        static char body[4200];
+        for (long rr = 1; rr <= rounds; rr++) {
+            for (int k = 0; k < 8; k++) {
+                int n = k_snprintf(body, sizeof body, "round=%ld file=%d ", rr, k);
+                int pad = (int)((k * 517 + rr * 131) % 4000);
+                for (int i = 0; i < pad; i++)
+                    body[n++] = (char)('a' + (i + rr) % 26);
+                n += k_snprintf(body + n, sizeof body - (size_t)n, " sum=%08x", crc32(body, (size_t)n));
+                char path[40];
+                k_snprintf(path, sizeof path, "/home/stress/f%d", k);
+                int wr = vfs_write_file(path, body, (size_t)n);
+                if (wr) {
+                    outf(C_ERROR, "pfsstress: %s: %s", path, vfs_strerror(wr));
+                    rr = rounds;
+                    break;
+                }
+            }
+            TEST_EVENT("PFS_ROUND %ld", rr);
+        }
+        outf(C_DIM, "pfsstress: done");
+    }
+    else if (!strcmp(c, "pfscheck")) {
+        static char body[4200];
+        int ok = 0, bad = 0, missing = 0;
+        long maxround = 0, minround = 1L << 30;
+        for (int k = 0; k < 8; k++) {
+            char path[40];
+            k_snprintf(path, sizeof path, "/home/stress/f%d", k);
+            size_t len = 0;
+            if (vfs_read_file(path, body, sizeof body - 1, &len)) {
+                missing++;
+                continue;
+            }
+            body[len] = 0;
+            char *sum = len > 13 ? body + len - 13 : NULL;
+            unsigned want = 0;
+            bool good = sum && !strncmp(sum, " sum=", 5);
+            for (int i = 5; good && i < 13; i++) {
+                char ch = sum[i];
+                int d = ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : -1;
+                if (d < 0)
+                    good = false;
+                want = want * 16 + (unsigned)d;
+            }
+            if (good && crc32(body, len - 13) == want) {
+                long rr = 0;
+                for (const char *q = body + 6; *q >= '0' && *q <= '9'; q++)
+                    rr = rr * 10 + (*q - '0');
+                maxround = MAX(maxround, rr);
+                minround = MIN(minround, rr);
+                ok++;
+            } else {
+                bad++;
+            }
+        }
+        if (!ok)
+            minround = 0;
+        outf(bad ? C_ERROR : C_TEXT, "pfscheck: ok=%d bad=%d missing=%d rounds=%ld..%ld", ok, bad, missing, minround, maxround);
+        TEST_EVENT("PFS_CHECK ok=%d bad=%d missing=%d min=%ld max=%ld", ok, bad, missing, minround, maxround);
+    }
     /* Test-build only: create a file of N bytes ('a'..'z' pattern, newline
      * every 64 bytes) so capacity limits can be exercised quickly. */
     else if (!strcmp(c, "testfill") && cl.argc == 3) {
@@ -577,6 +655,59 @@ static void execute(const char *line)
     else if (!strcmp(c, "reboot")) {
         out_color(C_DIM, "restarting...");
         desktop_request_reboot();
+    }
+    else if (!strcmp(c, "rm") || !strcmp(c, "rmdir")) {
+        if (cl.argc < 2) {
+            outf(C_ERROR, "usage: %s <path>", c);
+        } else {
+            char path[VFS_PATH_MAX + 1];
+            int er = resolve(cl.argv[1], path);
+            if (er == VFS_OK)
+                er = vfs_remove(path);
+            if (er)
+                outf(C_ERROR, "%s: %s: %s", c, cl.argv[1], vfs_strerror(er));
+            files_refresh_all();
+        }
+    }
+    else if (!strcmp(c, "mv")) {
+        if (cl.argc < 3) {
+            out_color(C_ERROR, "usage: mv <from> <to>");
+        } else {
+            char from[VFS_PATH_MAX + 1], to[VFS_PATH_MAX + 1];
+            int er = resolve(cl.argv[1], from);
+            if (er == VFS_OK)
+                er = resolve(cl.argv[2], to);
+            struct vfs_stat st;
+            if (er == VFS_OK && vfs_stat(to, &st) == VFS_OK && st.type == VFS_DIR) {
+                const char *base = strrchr(from, '/');
+                str_append(to, base, sizeof to); /* move into the directory */
+            }
+            if (er == VFS_OK)
+                er = vfs_rename(from, to);
+            if (er)
+                outf(C_ERROR, "mv: %s", vfs_strerror(er));
+            files_refresh_all();
+        }
+    }
+    else if (!strcmp(c, "sync")) {
+        int er = vfs_sync();
+        if (er)
+            outf(C_ERROR, "sync: %s", vfs_strerror(er));
+        else
+            out_color(C_DIM, vfs_home_persistent() ? "sync: all changes are on the data disk"
+                                                   : "sync: no data disk (nothing to flush)");
+    }
+    else if (!strcmp(c, "df")) {
+        struct vfs_storage stg;
+        vfs_storage(&stg);
+        struct vfs_usage u;
+        vfs_usage(&u);
+        if (stg.persistent)
+            outf(C_TEXT, "/home  data disk  %u KiB used of %u KiB  (generation %llu, %u corrupt files skipped)",
+                 stg.used_blocks * 4, stg.total_blocks * 4, (unsigned long long)stg.generation, stg.corrupt_files);
+        else
+            outf(C_TEXT, "/home  RAM        %u KiB used of %u KiB (lost on restart)", u.ram_bytes / 1024, RAMFS_MAX_TOTAL / 1024);
+        out_color(C_TEXT, "/system  initramfs  read-only");
     }
     else if (!strcmp(c, "run")) run_program(cl.argc, cl.argv, 1);
     else if (!strcmp(c, "ps")) cmd_ps();

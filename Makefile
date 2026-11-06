@@ -10,7 +10,7 @@ endif
 B := $(PYTHON) tools/build.py
 MEM ?= 256M
 
-.PHONY: all help deps run run-bios debug test smoke integration soak check clean dist
+.PHONY: all help deps run run-bios debug test smoke integration storage network soak check clean dist
 
 all:
 	$(B) build --variant release
@@ -40,6 +40,14 @@ smoke:
 integration:
 	$(B) build --variant test
 	$(PYTHON) tools/interaction_test.py
+
+storage:
+	$(B) build --variant test
+	$(PYTHON) tools/storage_test.py
+
+network:
+	$(B) build --variant test
+	$(PYTHON) tools/network_test.py
 
 soak:
 	$(B) build --variant test

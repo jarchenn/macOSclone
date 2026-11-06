@@ -17,6 +17,8 @@
 #include "fs/vfs.h"
 #include "core/sched.h"
 #include "net/net.h"
+#include "drivers/pci.h"
+#include "drivers/blk.h"
 #include "desktop/desktop.h"
 #include "lib.h"
 #include "limine.h"
@@ -151,6 +153,17 @@ static NORETURN void kmain_stage2(void)
         else
             klog("vfs: initramfs %s (%llu bytes) mounted at /system, seeded /home", initrd->path,
                  (unsigned long long)initrd->size);
+    }
+    pci_init();
+    if (vblk_init()) {
+        bool formatted = false;
+        int pr = vfs_attach_persistent(vblk_blockdev(), &formatted);
+        if (pr == VFS_OK)
+            klog("vfs: /home is on the data disk (%s)", formatted ? "blank disk formatted" : "existing files loaded");
+        else
+            klog("vfs: warning: data disk not used (%s); /home stays in RAM", vfs_strerror(pr));
+    } else {
+        klog("vfs: no data disk; /home is RAM-backed");
     }
     struct vfs_stat st;
     if (vfs_stat("/home/notes", &st) != VFS_OK)

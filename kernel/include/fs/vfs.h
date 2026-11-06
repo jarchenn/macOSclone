@@ -36,6 +36,7 @@ enum vfs_err {
     VFS_EBADARCHIVE = -13,
     VFS_EBUSY = -14,
     VFS_ENOTEMPTY = -15,
+    VFS_EIO = -16,
 };
 
 #define VFS_O_READ 1u
@@ -96,6 +97,20 @@ int vfs_read_file(const char *path, void *buf, size_t cap, size_t *len);
 int vfs_write_file(const char *path, const void *data, size_t len);
 
 uint32_t vfs_generation(void); /* increments on every mutation */
+
+/* Persistent /home (0.3). When a data disk is attached, /home is stored on
+ * it with the PFS format; every completed mutation is committed before the
+ * call returns, so a successful save survives power loss. */
+struct pfs_blockdev;
+int vfs_attach_persistent(struct pfs_blockdev *dev, bool *formatted);
+bool vfs_home_persistent(void);
+struct vfs_storage {
+    bool persistent;
+    uint64_t generation, commits, blocks_written;
+    uint32_t used_blocks, total_blocks, corrupt_files;
+    int last_error;
+};
+void vfs_storage(struct vfs_storage *out);
 void vfs_usage(struct vfs_usage *u);
 
 #endif

@@ -219,7 +219,8 @@ def build_user(variant: str) -> dict:
                 or script.stat().st_mtime > elf.stat().st_mtime):
             print(f"  ULD {rel(elf)}")
             run([ld, "-nostdlib", "-static", "-z", "max-page-size=0x1000", "-z", "noexecstack",
-                 "--build-id=none", "--no-undefined", "-T", str(script), "-o", str(elf)] + [str(o) for o in objs])
+                 "--build-id=none", "--no-undefined", "--strip-debug", "-T", str(script), "-o", str(elf)]
+                + [str(o) for o in objs])
         out[src.stem] = elf
     return out
 
@@ -444,7 +445,9 @@ HELP = """Aurora OS 0.1 - make targets
   make debug        QEMU paused with a GDB stub on tcp::1234
   make test         portable host tests (ASan/UBSan when the host compiler has them)
   make smoke        real-guest boot tests: 128/256/512 MiB UEFI, BIOS, panic diagnostic
-  make integration  real-guest input / window / file tests via QMP (test build)
+  make integration  real-guest input / window / file / process tests via QMP (test build)
+  make storage      persistent /home: reboot, power loss, crash-consistency stress
+  make network      DHCP, ping, DNS, UDP, TCP and HTTP against host-side test servers
   make soak         4-minute random input + idle soak test
   make check        image and linkage consistency checks
   make clean        remove build/ only
@@ -469,6 +472,8 @@ def main():
         r.add_argument("--variant", default="release", choices=list(VARIANTS))
         r.add_argument("--memory", default="256M")
         r.add_argument("--bios", action="store_true", help="boot via SeaBIOS instead of OVMF")
+        r.add_argument("--no-disk", action="store_true", help="no persistent data disk (/home in RAM)")
+        r.add_argument("--no-net", action="store_true", help="no network card")
     sub.add_parser("test")
     c = sub.add_parser("check")
     c.add_argument("--variant", choices=list(VARIANTS))
@@ -501,8 +506,16 @@ def cmd_run_wrapper(args, gdb):
     rundir = BUILD / "run"
     rundir.mkdir(parents=True, exist_ok=True)
     vc = vars_copy(rundir) if not args.bios else None
+    disk = None
+    if not args.no_disk:
+        disk = rundir / "data.img"
+        if not disk.exists():
+            with open(disk, "wb") as f:
+                f.truncate(32 * 1024 * 1024)  # blank: Aurora formats it on first boot
+            print(f"created {rel(disk)} (32 MiB persistent /home)")
     cmd = env.qemu_command(img, vc, memory=args.memory, firmware="bios" if args.bios else "uefi",
-                           serial="stdio", no_reboot=False, gdb=gdb)
+                           serial="stdio", no_reboot=False, gdb=gdb, data_disk=disk,
+                           network=None if args.no_net else True)
     print("+ " + " ".join(f'"{c}"' if " " in c else c for c in cmd))
     if gdb:
         print("GDB stub listening on tcp::1234; the guest is paused until a debugger continues it.")

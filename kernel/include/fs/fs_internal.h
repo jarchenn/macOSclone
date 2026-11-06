@@ -34,6 +34,9 @@ struct vfs_node {
     uint8_t *data;
     uint32_t size;
     uint32_t capacity; /* bytes owned by the node (0 for initramfs data) */
+    /* Persistent backend bookkeeping (PFS extent of the committed copy). */
+    uint32_t disk_start, disk_blocks, disk_crc;
+    bool dirty;
 };
 
 extern const struct fs_backend ramfs_backend;

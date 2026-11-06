@@ -10,6 +10,7 @@
 #include "memory/physical.h"
 #include "memory/virtual.h"
 #include "fs/vfs.h"
+#include "core/process.h"
 #include "lib.h"
 
 enum { TAB_APPEARANCE = 0, TAB_SHORTCUTS = 1, TAB_ABOUT = 2, NTABS = 3 };
@@ -69,25 +70,33 @@ static void render_about(struct surface *s)
     row(s, &y, "Kernel heap", buf);
     struct vfs_usage u;
     vfs_usage(&u);
-    k_snprintf(buf, sizeof buf, "%u KiB of %u KiB (RAM)", u.ram_bytes / 1024, RAMFS_MAX_TOTAL / 1024);
-    row(s, &y, "Session files", buf);
+    struct vfs_storage stg;
+    vfs_storage(&stg);
+    if (stg.persistent)
+        k_snprintf(buf, sizeof buf, "data disk, %u of %u KiB used", stg.used_blocks * 4, stg.total_blocks * 4);
+    else
+        k_snprintf(buf, sizeof buf, "RAM only, %u of %u KiB", u.ram_bytes / 1024, RAMFS_MAX_TOTAL / 1024);
+    row(s, &y, "/home storage", buf);
+    k_snprintf(buf, sizeof buf, "%d running", process_count());
+    row(s, &y, "User processes", buf);
     y += 6;
     widget_separator(s, 24, y, s->w - 48);
     y += 10;
     draw_text_bold(s, FONT, 24, y, "Supported", t->text);
     y += 20;
     y = app_draw_wrapped(s, FONT, 24, y, s->w - 48, 17,
-                         "PS/2 keyboard (US layout) and mouse, software-composited desktop, built-in "
-                         "Terminal, Files, Notes and Settings, read-only /system and RAM-backed /home.",
+                         "Preemptive user processes in ring 3 with private address spaces, system calls, "
+                         "a persistent /home on a virtio data disk (RAM when none is attached), "
+                         "IPv4 networking over virtio-net, PS/2 input and a composited desktop.",
                          t->text_dim);
     y += 6;
     draw_text_bold(s, FONT, 24, y, "Limitations", t->text);
     y += 20;
     draw_round_rect(s, rect_make(20, y - 4, s->w - 40, 76), 6, t->warning_bg, 255, 0xF);
     app_draw_wrapped(s, FONT, 30, y + 2, s->w - 60, 17,
-                     "Files are stored in memory and reset when Aurora restarts. Apps run inside one "
-                     "kernel address space: they are not isolated, and an app fault stops the system. "
-                     "No networking, audio, USB, SMP or persistent disk yet.",
+                     "The desktop apps still run inside the kernel; only programs in /system/bin "
+                     "are isolated processes. Single CPU, no FPU in user programs, no TLS, audio, "
+                     "USB or SMP. Tested only in QEMU.",
                      t->warning_text);
 }
 

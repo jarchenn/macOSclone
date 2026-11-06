@@ -29,7 +29,7 @@ static void render(struct window *w, struct surface *s)
         y = app_draw_wrapped(s, FONT, 24, y, s->w - 48, 18, "(/system/welcome.txt could not be read)", t->danger);
     struct rect note = rect_make(20, s->h - 92, s->w - 40, 34);
     draw_round_rect(s, note, 6, t->warning_bg, 255, 0xF);
-    draw_text(s, FONT, note.x + 10, note.y + 9, "Files are stored in memory and reset when Aurora restarts.", t->warning_text);
+    draw_text_fit(s, FONT, note.x + 10, note.y + 9, app_storage_note(), note.w - 20, t->warning_text);
     widget_button(s, start_btn(s), "Get Started", BTN_PRIMARY, W.hover);
 }
 

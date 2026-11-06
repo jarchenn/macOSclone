@@ -1,6 +1,7 @@
 /* VFS core: namespace, path lookup, open-file table and dispatch to backends. */
 #include "fs/fs_internal.h"
 #include "fs/initramfs.h"
+#include "fs/pfs.h"
 #include "kalloc.h"
 #include "lib.h"
 
@@ -9,14 +10,170 @@ struct open_file {
     uint32_t offset;
     unsigned flags;
     bool used;
+    bool wrote; /* commit to disk on close */
 };
 
 static struct vfs_node *root;
 static struct vfs_node *home;
 static struct open_file files[VFS_MAX_OPEN];
 static uint32_t generation;
+static struct pfs pfs;
+static bool persistent;
+static int last_commit_error;
 
 uint32_t vfs_generation(void) { return generation; }
+
+/* ---- persistent /home ----------------------------------------------------- */
+
+static int commit_home(void);
+
+static int p_create(struct vfs_node *parent, const char *name, uint8_t type, struct vfs_node **out);
+static int p_write(struct vfs_node *n, uint32_t off, const void *buf, uint32_t len)
+{
+    int r = ramfs_backend.write(n, off, buf, len);
+    if (!r)
+        n->dirty = true;
+    return r;
+}
+static int p_truncate(struct vfs_node *n, uint32_t size)
+{
+    int r = ramfs_backend.truncate(n, size);
+    if (!r)
+        n->dirty = true;
+    return r;
+}
+static int p_replace(struct vfs_node *n, const void *buf, uint32_t len)
+{
+    int r = ramfs_backend.replace(n, buf, len);
+    if (!r)
+        n->dirty = true;
+    return r;
+}
+static int p_remove(struct vfs_node *n) { return ramfs_backend.remove(n); }
+static int p_sync(void) { return commit_home(); }
+
+static const struct fs_backend pfs_backend = {
+    .name = "pfs",
+    .readonly = false,
+    .create = p_create,
+    .write = p_write,
+    .truncate = p_truncate,
+    .replace = p_replace,
+    .remove = p_remove,
+    .sync = p_sync,
+};
+
+static int p_create(struct vfs_node *parent, const char *name, uint8_t type, struct vfs_node **out)
+{
+    int r = ramfs_backend.create(parent, name, type, out);
+    if (!r) {
+        (*out)->fs = &pfs_backend;
+        (*out)->dirty = true;
+    }
+    return r;
+}
+
+static int map_pfs_error(int r)
+{
+    switch (r) {
+    case PFS_OK: return VFS_OK;
+    case PFS_E_NOSPC:
+    case PFS_E_TOOMANY: return VFS_ENOSPC;
+    case PFS_E_NOMEM: return VFS_ENOMEM;
+    default: return VFS_EIO;
+    }
+}
+
+static int collect(struct vfs_node *dir, const char *prefix, struct pfs_entry *e, struct vfs_node **nodes, size_t *n)
+{
+    for (struct vfs_node *c = dir->children; c; c = c->next) {
+        if (*n >= PFS_MAX_ENTRIES)
+            return PFS_E_TOOMANY;
+        struct pfs_entry *x = &e[*n];
+        memset(x, 0, sizeof *x);
+        if (prefix[0])
+            k_snprintf(x->path, sizeof x->path, "%s/%s", prefix, c->name);
+        else
+            str_copy(x->path, c->name, sizeof x->path);
+        x->type = c->type;
+        if (c->type == VFS_FILE) {
+            x->size = c->size;
+            x->data = c->data;
+            x->dirty = c->dirty;
+            x->start = c->disk_start;
+            x->nblocks = c->disk_blocks;
+            x->crc = c->disk_crc;
+        }
+        nodes[(*n)++] = c;
+        if (c->type == VFS_DIR) {
+            int r = collect(c, x->path, e, nodes, n);
+            if (r)
+                return r;
+        }
+    }
+    return PFS_OK;
+}
+
+static int commit_home(void)
+{
+    if (!persistent)
+        return VFS_OK;
+    struct pfs_entry *e = kcalloc(PFS_MAX_ENTRIES, sizeof *e);
+    struct vfs_node **nodes = kcalloc(PFS_MAX_ENTRIES, sizeof *nodes);
+    int r = PFS_E_NOMEM;
+    size_t n = 0;
+    if (e && nodes) {
+        r = collect(home, "", e, nodes, &n);
+        if (r == PFS_OK)
+            r = pfs_commit(&pfs, e, n);
+        if (r == PFS_OK) {
+            for (size_t i = 0; i < n; i++) {
+                if (nodes[i]->type == VFS_FILE) {
+                    nodes[i]->disk_start = e[i].start;
+                    nodes[i]->disk_blocks = e[i].nblocks;
+                    nodes[i]->disk_crc = e[i].crc;
+                    nodes[i]->dirty = false;
+                }
+            }
+        }
+    }
+    if (e)
+        kfree(e);
+    if (nodes)
+        kfree(nodes);
+    last_commit_error = map_pfs_error(r);
+    return last_commit_error;
+}
+
+static bool in_persistent_home(const struct vfs_node *n)
+{
+    if (!persistent)
+        return false;
+    for (; n; n = n->parent)
+        if (n == home)
+            return true;
+    return false;
+}
+
+/* Called after a mutation completed in memory: makes it durable. */
+static int persist(const struct vfs_node *n) { return in_persistent_home(n) ? commit_home() : VFS_OK; }
+
+bool vfs_home_persistent(void) { return persistent; }
+
+void vfs_storage(struct vfs_storage *out)
+{
+    memset(out, 0, sizeof *out);
+    out->persistent = persistent;
+    if (!persistent)
+        return;
+    out->generation = pfs.stats.generation;
+    out->commits = pfs.stats.commits;
+    out->blocks_written = pfs.stats.blocks_written;
+    out->used_blocks = pfs.stats.used_blocks;
+    out->total_blocks = pfs.stats.total_blocks;
+    out->corrupt_files = (uint32_t)pfs.stats.corrupt_files;
+    out->last_error = last_commit_error;
+}
 
 const char *vfs_strerror(int err)
 {
@@ -37,6 +194,7 @@ const char *vfs_strerror(int err)
     case VFS_EBADARCHIVE: return "corrupt initramfs archive";
     case VFS_EBUSY: return "file is in use";
     case VFS_ENOTEMPTY: return "directory not empty";
+    case VFS_EIO: return "disk I/O error";
     default: return "unknown error";
     }
 }
@@ -76,6 +234,11 @@ static void free_tree(struct vfs_node *n)
 
 void vfs_init(void)
 {
+    if (persistent) {
+        pfs_unmount(&pfs);
+        persistent = false;
+    }
+    last_commit_error = 0;
     if (root)
         free_tree(root);
     memset(files, 0, sizeof files);
@@ -159,13 +322,15 @@ static int create_node(const char *path, uint8_t type, struct vfs_node **out)
 int vfs_mkdir(const char *path)
 {
     struct vfs_node *n;
-    return create_node(path, VFS_DIR, &n);
+    int r = create_node(path, VFS_DIR, &n);
+    return r ? r : persist(n);
 }
 
 int vfs_create(const char *path)
 {
     struct vfs_node *n;
-    return create_node(path, VFS_FILE, &n);
+    int r = create_node(path, VFS_FILE, &n);
+    return r ? r : persist(n);
 }
 
 int vfs_stat(const char *path, struct vfs_stat *st)
@@ -213,9 +378,11 @@ int vfs_open(const char *path, unsigned flags)
     if (slot < 0)
         return VFS_EMFILE;
     struct vfs_node *n;
+    bool created = false;
     int r = resolve(path, &n, NULL);
     if (r == VFS_ENOENT && (flags & VFS_O_CREATE)) {
         r = create_node(path, VFS_FILE, &n);
+        created = r == VFS_OK;
     }
     if (r)
         return r;
@@ -229,7 +396,8 @@ int vfs_open(const char *path, unsigned flags)
             return r;
         generation++;
     }
-    files[slot] = (struct open_file){ .node = n, .offset = 0, .flags = flags, .used = true };
+    files[slot] = (struct open_file){ .node = n, .offset = 0, .flags = flags, .used = true,
+                                      .wrote = created || (flags & VFS_O_TRUNC) };
     return slot;
 }
 
@@ -245,9 +413,11 @@ int vfs_close(int fd)
     struct open_file *f = get_fd(fd);
     if (!f)
         return VFS_EBADF;
+    struct vfs_node *n = f->node;
+    bool wrote = f->wrote;
     f->used = false;
     f->node = NULL;
-    return VFS_OK;
+    return wrote ? persist(n) : VFS_OK;
 }
 
 int vfs_read(int fd, void *buf, size_t n)
@@ -278,6 +448,7 @@ int vfs_write(int fd, const void *buf, size_t n)
     int r = f->node->fs->write(f->node, f->offset, buf, (uint32_t)n);
     if (r)
         return r;
+    f->wrote = true;
     f->offset += (uint32_t)n;
     generation++;
     return (int)n;
@@ -301,8 +472,10 @@ int vfs_truncate(const char *path, uint32_t size)
     if (n->type == VFS_DIR)
         return VFS_EISDIR;
     r = n->fs->truncate(n, size);
-    if (r == VFS_OK)
+    if (r == VFS_OK) {
         generation++;
+        r = persist(n);
+    }
     return r;
 }
 
@@ -342,12 +515,13 @@ int vfs_remove(const char *path)
     r = n->fs->remove ? n->fs->remove(n) : VFS_EROFS;
     if (r)
         return r;
+    struct vfs_node *parent = n->parent;
     detach(n);
     if (n->capacity && n->data)
         kfree(n->data);
     kfree(n);
     generation++;
-    return VFS_OK;
+    return persist(parent);
 }
 
 int vfs_rename(const char *from, const char *to)
@@ -386,7 +560,7 @@ int vfs_rename(const char *from, const char *to)
     if (n->fs->changed)
         n->fs->changed(n);
     generation++;
-    return VFS_OK;
+    return persist(n);
 }
 
 int vfs_sync(void)
@@ -421,15 +595,17 @@ int vfs_write_file(const char *path, const void *data, size_t len)
             return r;
         r = n->fs->replace(n, data, (uint32_t)len);
         generation++;
-        return r;
+        return r ? r : persist(n);
     }
     if (r)
         return r;
     if (n->type == VFS_DIR)
         return VFS_EISDIR;
     r = n->fs->replace(n, data, (uint32_t)len);
-    if (r == VFS_OK)
+    if (r == VFS_OK) {
         generation++;
+        r = persist(n);
+    }
     return r;
 }
 
@@ -486,6 +662,93 @@ static int load_entry(void *ctx, uint32_t type, const char *path, const uint8_t 
     }
     vfs_node_attach(dir, n);
     return VFS_OK;
+}
+
+/* ---- attaching the data disk ------------------------------------------- */
+
+static int emit_entry(void *ctx, const struct pfs_entry *e, const uint8_t *data)
+{
+    UNUSED(ctx);
+    char abs[VFS_PATH_MAX + 2], parent[VFS_PATH_MAX + 1], name[VFS_NAME_MAX + 1];
+    k_snprintf(abs, sizeof abs, "/home/%s", e->path);
+    char norm[VFS_PATH_MAX + 1];
+    if (vfs_normalize("/", abs, norm, sizeof norm) || vfs_split(norm, parent, sizeof parent, name, sizeof name))
+        return -1;
+    struct vfs_node *dir, *existing;
+    if (lookup(parent, &dir) || dir->type != VFS_DIR || lookup(norm, &existing) == VFS_OK)
+        return -1;
+    struct vfs_node *n;
+    if (ramfs_backend.create(dir, name, e->type, &n))
+        return -1;
+    n->fs = &pfs_backend;
+    if (e->type == VFS_FILE) {
+        if (ramfs_backend.replace(n, data, e->size)) {
+            /* Out of RAM quota: drop the node rather than ever committing an
+             * empty copy over the data on disk. */
+            ramfs_backend.remove(n);
+            detach(n);
+            kfree(n);
+            return -1;
+        }
+        n->disk_start = e->start;
+        n->disk_blocks = e->nblocks;
+        n->disk_crc = e->crc;
+    }
+    n->dirty = false;
+    return 0;
+}
+
+static void convert_tree(struct vfs_node *n)
+{
+    for (; n; n = n->next) {
+        n->fs = &pfs_backend;
+        n->dirty = true;
+        convert_tree(n->children);
+    }
+}
+
+static void drop_tree(struct vfs_node *n)
+{
+    while (n) {
+        struct vfs_node *next = n->next;
+        drop_tree(n->children);
+        ramfs_backend.remove(n); /* release RAM quota */
+        if (n->capacity && n->data)
+            kfree(n->data);
+        kfree(n);
+        n = next;
+    }
+}
+
+int vfs_attach_persistent(struct pfs_blockdev *dev, bool *formatted_out)
+{
+    if (!home || !dev)
+        return VFS_EINVAL;
+    /* Contents seeded from the initramfs stay aside until we know whether
+     * the disk is new (keep them) or already holds the user's files. */
+    struct vfs_node *seed = home->children;
+    home->children = NULL;
+    bool formatted = false;
+    int r = pfs_mount(&pfs, dev, emit_entry, NULL, &formatted);
+    if (r != PFS_OK) {
+        drop_tree(home->children);
+        home->children = seed;
+        return map_pfs_error(r);
+    }
+    persistent = true;
+    home->fs = &pfs_backend;
+    if (formatted) {
+        home->children = seed;
+        convert_tree(seed);
+        r = commit_home();
+    } else {
+        drop_tree(seed);
+        r = VFS_OK;
+    }
+    if (formatted_out)
+        *formatted_out = formatted;
+    generation++;
+    return r;
 }
 
 int vfs_load_initramfs(const uint8_t *data, size_t size)

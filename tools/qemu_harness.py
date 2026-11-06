@@ -56,7 +56,8 @@ def char_keys(ch: str):
 
 
 class Guest:
-    def __init__(self, image, memory="256M", firmware="uefi", name="guest", no_reboot=True, keep_dir=None):
+    def __init__(self, image, memory="256M", firmware="uefi", name="guest", no_reboot=True, keep_dir=None,
+                 data_disk=None, network=None):
         self.image = Path(image)
         self.memory = memory
         self.firmware = firmware
@@ -69,6 +70,8 @@ class Guest:
         self._buf = b""
         self._pos = 0
         self.cursor = None  # last cursor position reported by the guest (test builds)
+        self.data_disk = data_disk  # path to a raw image, kept across start/stop
+        self.network = network
 
     # ---- lifecycle -------------------------------------------------------
     def start(self):
@@ -83,7 +86,8 @@ class Guest:
         port = _free_port()
         cmd = env.qemu_command(img, vars_copy, memory=self.memory, firmware=self.firmware,
                                serial=f"file:{self.serial_path}", qmp=f"tcp:127.0.0.1:{port},server=on,wait=off",
-                               display="none", no_reboot=self.no_reboot)
+                               display="none", no_reboot=self.no_reboot,
+                               data_disk=self.data_disk, network=self.network)
         self.cmdline = cmd
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=self.tmp)
         deadline = time.time() + 20

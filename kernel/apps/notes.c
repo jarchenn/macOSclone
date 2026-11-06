@@ -2,6 +2,7 @@
 #include "desktop/desktop.h"
 #include "apps/textbuf.h"
 #include "fs/vfs.h"
+#include "apps/app_util.h"
 #include "core/log.h"
 #include "lib.h"
 
@@ -207,7 +208,7 @@ static void render(struct window *w, struct surface *s)
     if (N.status[0])
         draw_text_fit(s, FONT, 12, fy + 5, N.status, status_w, N.status_err ? t->danger : t->text_dim);
     else
-        draw_text_fit(s, FONT, 12, fy + 5, "Files are stored in memory and reset when Aurora restarts.", status_w, t->text_dim);
+        draw_text_fit(s, FONT, 12, fy + 5, app_storage_note(), status_w, t->text_dim);
     draw_text(s, FONT, s->w - 12 - text_width(FONT, pos), fy + 5, pos, t->text_dim);
 
     /* Dialogs */
@@ -302,7 +303,8 @@ static int write_to(const char *path)
         str_copy(N.path, path, sizeof N.path);
         N.dirty = false;
         N.readonly = false;
-        set_status(false, "Saved %s (%zu bytes, in memory)", path, N.tb.len);
+        set_status(false, "Saved %s (%zu bytes, %s)", path, N.tb.len,
+                   vfs_home_persistent() && str_starts_with(path, "/home") ? "on disk" : "in memory");
         files_refresh_all();
     } else {
         /* The buffer is untouched: edits are preserved. */

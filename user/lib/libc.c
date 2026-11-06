@@ -138,6 +138,7 @@ const char *strerror(long e)
     case -12: return "file too large";
     case -14: return "file is in use";
     case -15: return "directory not empty";
+    case -16: return "disk I/O error";
     case AE_FAULT: return "bad address";
     case AE_NOSYS: return "no such system call";
     case AE_BADF: return "bad file descriptor";
