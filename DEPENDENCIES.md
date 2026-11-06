@@ -35,3 +35,13 @@ machine (Windows 11 x86-64 host):
 The Linux reference environment (`Dockerfile`, Ubuntu 24.04 packages
 `clang lld make python3 qemu-system-x86 ovmf gcc`) is provided but was not
 executed during this release; see `STATUS.md`.
+
+## Since 0.1
+
+Releases 0.2–0.4 add no third-party code to the image. The VirtIO, PCI,
+ACPI, network-protocol, filesystem and user-runtime code is original. The
+user programs in `/system/bin` are built from `user/` with the same clang/lld
+toolchain. Tests use QEMU's `virtio-blk-pci` and `virtio-net-pci` devices and
+user-mode networking (slirp), all part of the QEMU build listed above. The
+host-side test servers in `tools/network_test.py` use only the Python
+standard library.

@@ -26,16 +26,19 @@ and allocator code goes through this conversion.
 
 | Range | Mapping | Permissions |
 |---|---|---|
-| `0x0` – `0x00007fffffffffff` | nothing | NULL and all low addresses fault |
+| `0x0` – `0x00007fffffffffff` | the current user process (kernel tasks: nothing) | user pages U, W/X per ELF segment; NULL page never mapped |
 | HHDM (Limine offset, `0xffff800000000000` on QEMU) | usable, bootloader-reclaimable and kernel+module RAM (2 MiB pages where aligned) | RW, NX |
 | HHDM + framebuffer phys | framebuffer, 4 KiB pages | RW, NX, WC (PAT5) or UC |
 | `0xffffc00000000000` | kernel heap, mapped on demand | RW, NX |
 | `0xffffd00000000000` | guard page (unmapped) | — |
-| `0xffffd00000001000` | 64 KiB kernel stack | RW, NX |
+| `0xffffd00000001000` | 64 KiB boot/desktop kernel stack | RW, NX |
+| `0xffffd00000100000` and up | 32 KiB per-task kernel stacks in fixed slots, each with an unmapped guard page | RW, NX |
+| HHDM + ACPI/reserved phys | ACPI reclaimable/NVS and reserved regions, for table parsing | R, NX |
 | `0xffffe00000000000` | local APIC MMIO page | RW, NX, UC |
 | `0xffffffff80000000` | kernel image | `.limine_requests` RW+NX, `.text` RX, `.rodata` R+NX, `.data/.bss` RW+NX |
 
-ACPI and reserved regions are deliberately not mapped. The kernel checks that
+ACPI and reserved regions are mapped read-only (for ACPI table parsing),
+never writable. The kernel checks that
 the HHDM does not collide with the heap region before switching.
 
 NX is set only if CPUID reports it and Limine enabled `EFER.NXE`; otherwise
@@ -82,6 +85,14 @@ IST1 and reaches the panic handler.
   panic). `heap_check` walks every block and cross-checks the statistics.
 * Statistics (`mem` in Terminal, About): mapped bytes, bytes in use, peak,
   live allocations, failures.
-* Main-loop context only; never called from IRQ handlers.
+* Task context only; never called from IRQ handlers. The kernel is not
+  preemptible, so no locking is needed.
 
-No memory protection exists between apps in 0.1.
+User processes each have their own lower half (see
+[processes.md](processes.md)). The built-in apps are kernel code and are not
+protected from one another.
+
+## DMA memory
+
+VirtIO queues and buffers come from `pmm_alloc_contig` (physically contiguous
+runs) and are accessed through the HHDM.

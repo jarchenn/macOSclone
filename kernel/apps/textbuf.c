@@ -6,6 +6,8 @@ void tb_init(struct textbuf *t)
     t->len = 0;
     t->cursor = 0;
     t->goal_col = 0;
+    t->anchor = 0;
+    t->has_sel = false;
     t->data[0] = '\0';
 }
 
@@ -17,6 +19,7 @@ bool tb_set(struct textbuf *t, const char *text, size_t len)
     t->len = len;
     t->cursor = 0;
     t->goal_col = 0;
+    t->has_sel = false;
     return true;
 }
 
@@ -47,6 +50,7 @@ static void update_goal(struct textbuf *t) { t->goal_col = t->cursor - tb_line_s
 
 bool tb_insert(struct textbuf *t, char c)
 {
+    tb_delete_selection(t);
     if (t->len >= TEXTBUF_CAP)
         return false;
     memmove(t->data + t->cursor + 1, t->data + t->cursor, t->len - t->cursor);
@@ -58,6 +62,8 @@ bool tb_insert(struct textbuf *t, char c)
 
 bool tb_backspace(struct textbuf *t)
 {
+    if (tb_delete_selection(t))
+        return true;
     if (t->cursor == 0)
         return false;
     memmove(t->data + t->cursor - 1, t->data + t->cursor, t->len - t->cursor);
@@ -69,6 +75,8 @@ bool tb_backspace(struct textbuf *t)
 
 bool tb_delete(struct textbuf *t)
 {
+    if (tb_delete_selection(t))
+        return true;
     if (t->cursor >= t->len)
         return false;
     memmove(t->data + t->cursor, t->data + t->cursor + 1, t->len - t->cursor - 1);
@@ -127,4 +135,78 @@ void tb_down(struct textbuf *t)
         return;
     }
     move_to_col(t, end + 1);
+}
+
+void tb_select_begin(struct textbuf *t)
+{
+    if (!t->has_sel) {
+        t->anchor = t->cursor;
+        t->has_sel = true;
+    }
+}
+
+void tb_select_clear(struct textbuf *t) { t->has_sel = false; }
+
+void tb_select_all(struct textbuf *t)
+{
+    t->anchor = 0;
+    t->cursor = t->len;
+    t->has_sel = true;
+    update_goal(t);
+}
+
+bool tb_selection(const struct textbuf *t, size_t *start, size_t *end)
+{
+    if (!t->has_sel || t->anchor == t->cursor || t->anchor > t->len)
+        return false;
+    *start = t->anchor < t->cursor ? t->anchor : t->cursor;
+    *end = t->anchor < t->cursor ? t->cursor : t->anchor;
+    return true;
+}
+
+bool tb_delete_selection(struct textbuf *t)
+{
+    size_t a, b;
+    bool any = tb_selection(t, &a, &b);
+    t->has_sel = false;
+    if (!any)
+        return false;
+    memmove(t->data + a, t->data + b, t->len - b);
+    t->len -= b - a;
+    t->cursor = a;
+    update_goal(t);
+    return true;
+}
+
+bool tb_insert_text(struct textbuf *t, const char *text, size_t n)
+{
+    size_t a = t->cursor, b = t->cursor;
+    tb_selection(t, &a, &b);
+    if (t->len - (b - a) + n > TEXTBUF_CAP)
+        return false;
+    tb_delete_selection(t);
+    memmove(t->data + t->cursor + n, t->data + t->cursor, t->len - t->cursor);
+    memcpy(t->data + t->cursor, text, n);
+    t->cursor += n;
+    t->len += n;
+    update_goal(t);
+    return true;
+}
+
+static char clip_data[CLIPBOARD_CAP];
+static size_t clip_len;
+
+bool clipboard_set(const char *text, size_t n)
+{
+    if (n > CLIPBOARD_CAP)
+        return false;
+    memcpy(clip_data, text, n);
+    clip_len = n;
+    return true;
+}
+
+const char *clipboard_get(size_t *n)
+{
+    *n = clip_len;
+    return clip_data;
 }

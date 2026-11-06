@@ -275,6 +275,29 @@ void wm_restore(struct window *w)
     }
 }
 
+bool wm_resize(struct window *w, int32_t width, int32_t height)
+{
+    if (!w || w->state != WIN_NORMAL)
+        return false;
+    struct rect wa = wm_work_area();
+    width = CLAMP(width, WM_MIN_W, wa.w);
+    height = CLAMP(height, WM_MIN_H, wa.y + wa.h - w->frame.y);
+    if (height < WM_MIN_H)
+        height = WM_MIN_H;
+    if (width == w->frame.w && height == w->frame.h)
+        return true;
+    struct rect before = wm_damage_rect(w);
+    if (!resize_content(w, rect_make(w->frame.x, w->frame.y, width, height))) {
+        klog("wm: not enough memory to resize window %u", w->id);
+        return false;
+    }
+    w->restore_frame = w->frame;
+    report_geometry(w);
+    desktop_damage(before);
+    desktop_damage(wm_damage_rect(w));
+    return true;
+}
+
 void wm_toggle_maximize(struct window *w)
 {
     if (!w || w->state == WIN_MINIMIZED)
@@ -432,5 +455,12 @@ void wm_paint(struct surface *s, struct window *w, bool focused)
     draw_control(s, f.x + CTRL_MAX_X, f.y + CTRL_Y, col ? RGB(0x28, 0xC8, 0x40) : t->ctrl_inactive, 2, hov);
     /* Content with rounded bottom corners. */
     blit_round_bottom(s, &w->content, f.x, f.y + TITLE_H, WIN_RADIUS);
+    if (w->state == WIN_NORMAL) {
+        /* Resize grip: three short diagonals in the bottom-right corner. */
+        int32_t gx = f.x + f.w - 5, gy = f.y + f.h - 5;
+        for (int k = 0; k < 3; k++)
+            for (int i = 0; i <= 3 + 3 * k; i++)
+                draw_pixel_blend(s, gx - i, gy - (3 + 3 * k) + i, t->text_dim, 150);
+    }
     draw_round_frame(s, f, WIN_RADIUS, t->win_border, t->border_alpha);
 }

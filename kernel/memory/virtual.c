@@ -99,13 +99,17 @@ void vmm_init(void)
     map_kernel_range((uint64_t)__rodata_start, (uint64_t)__rodata_end, PTE_NX);        /* R */
     map_kernel_range((uint64_t)__data_start, (uint64_t)__kernel_end, PTE_W | PTE_NX);  /* RW */
 
-    /* Direct map: only the region types we use. Reserved, ACPI and bad memory
-     * stay unmapped so stray accesses fault. */
+    /* Direct map: usable RAM, bootloader memory, the kernel and modules
+     * read-write; ACPI and "reserved mapped" firmware regions read-only.
+     * Plain reserved and bad memory stay unmapped so stray accesses fault. */
     for (size_t i = 0; i < g_boot.memmap_count; i++) {
         const struct boot_mem_region *r = &g_boot.memmap[i];
         if (r->type == BOOT_MEM_USABLE || r->type == BOOT_MEM_BOOTLOADER_RECLAIMABLE ||
             r->type == BOOT_MEM_KERNEL_AND_MODULES)
             map_hhdm_range(r->base, r->base + r->length, PTE_W | PTE_NX);
+        else if (r->type == BOOT_MEM_ACPI_RECLAIMABLE || r->type == BOOT_MEM_ACPI_NVS ||
+                 r->type == BOOT_MEM_RESERVED_MAPPED)
+            map_hhdm_range(r->base, r->base + r->length, PTE_NX); /* firmware tables: read-only */
     }
 
     /* Framebuffer. Limine documents its PAT layout (PAT5 = WC); we only use

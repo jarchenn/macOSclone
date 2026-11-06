@@ -19,6 +19,7 @@
 #include "net/net.h"
 #include "drivers/pci.h"
 #include "drivers/blk.h"
+#include "drivers/acpi.h"
 #include "desktop/desktop.h"
 #include "lib.h"
 #include "limine.h"
@@ -154,6 +155,8 @@ static NORETURN void kmain_stage2(void)
             klog("vfs: initramfs %s (%llu bytes) mounted at /system, seeded /home", initrd->path,
                  (unsigned long long)initrd->size);
     }
+    if (!acpi_init())
+        klog("acpi: not available; power-off falls back to the QEMU PM port");
     pci_init();
     if (vblk_init()) {
         bool formatted = false;

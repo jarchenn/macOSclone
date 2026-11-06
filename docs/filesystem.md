@@ -6,13 +6,73 @@
 |---|---|---|---|
 | `/` | synthetic directory | no | — |
 | `/system` | initramfs (boot module), data read in place | no | image contents |
-| `/home` | RAM filesystem (kernel heap) | yes | **until restart** |
+| `/home` | PFS on the VirtIO data disk, if one is attached | yes | **survives restarts and power loss** |
+| `/home` (no data disk) | RAM filesystem (kernel heap) | yes | until restart |
 
-**Files are stored in memory and reset when Aurora restarts.** Nothing is
-written to disk. At boot the archive's `home/` entries are copied into the RAM
-filesystem (currently `/home/notes/example.txt`) and `/home/notes` is ensured
-to exist. Notes, Files, Terminal and the Welcome window all go through the
-same VFS API; there are no app-private file lists.
+`make run` attaches a 32 MiB data disk (`build/run/data.img`, created when
+missing) and a NIC. `--no-disk` boots without the disk. Without a disk,
+**files are stored in memory and reset when Aurora restarts**. Notes, Files,
+Settings and the Welcome window say which mode is active
+(`app_storage_note()`). `df` in Terminal prints it too.
+
+At boot, the archive's `home/` entries are loaded into RAM first. If a data
+disk is found:
+
+* **blank disk** (no PFS superblock in either slot, and no other magic): it
+  is formatted, and the seeded files are written to it;
+* **valid PFS**: the seeded files are dropped and the disk's files are
+  loaded;
+* **anything else** (bad CRCs in both slots, an unknown magic, an I/O error):
+  the disk is **not touched and not reformatted**. `/home` stays in RAM, and
+  the log and `df` say why. Test: `damaged_disk_is_not_reformatted`.
+
+Notes, Files, Terminal and the Welcome window all go through the same VFS
+API; there are no app-private file lists.
+
+## Data disk: VirtIO block (`drivers/virtio_blk.c`)
+
+Legacy VirtIO over PCI (I/O BAR0) with split virtqueues in physically
+contiguous DMA memory. Requests are polled with a 5-second timeout. On a
+timeout or device error, the disk is taken offline and later writes return
+`EIO`; nothing hangs. Every commit ends with a FLUSH request.
+
+## PFS v1 on-disk format (`fs/pfs.c`, portable)
+
+4 KiB blocks. Blocks 0 and 1 are two superblock slots, each CRC-protected and
+carrying a generation number. Everything else is the data area. A catalog
+lists every directory and file: path, type, size, extent start, CRC-32 of the
+content. Every file is one contiguous extent.
+
+A commit runs after every mutation (write on close, create, mkdir, remove,
+rename, truncate):
+
+1. Write changed files into blocks the committed state does not use (shadow
+   paging / copy-on-write). Unchanged files keep their extents.
+2. Write a new catalog the same way.
+3. Flush, write the superblock with generation + 1 into the *other* slot,
+   then flush again.
+
+A crash before step 3 completes leaves the old superblock, catalog and data
+intact. A torn superblock fails its CRC, so mount picks the valid slot with
+the highest generation. Mount checks the catalog's CRC and magic and each
+extent's bounds, then reads every file into memory and checks it against its
+CRC. A damaged file is skipped and counted, and the rest are kept.
+
+Tests:
+
+* host `pfs`: simulated power loss after *every* block write of a commit,
+  plus torn writes, then remount and compare;
+* host `vfs_disk`: the VFS on top of PFS;
+* guest `storage_test.py`: reboot persistence, killing QEMU right after a
+  Notes save, and 4 hard kills (QEMU process killed) during a stress loop.
+  After each kill every file is either the old or the new version, never a
+  mix.
+
+Limits: 512 entries, 64 KiB per file, paths ≤ 255 bytes, disk ≥ 64 blocks.
+The whole catalog is rewritten on each commit, so a commit costs O(number of
+files). There is no journal replay, fsck or defragmentation; a disk with too
+much free-space fragmentation reports `ENOSPC` even when the total free space
+would fit.
 
 ## Paths
 
@@ -36,7 +96,10 @@ the old buffer is released, so on any error (read-only, too large, out of
 space, out of memory) the previous content is unchanged. Notes relies on this
 and also keeps its own buffer, so a failed save never loses edits.
 
-There is no delete or rename in 0.1.
+`vfs_remove` deletes a file or an empty directory (`ENOTEMPTY` otherwise;
+`EBUSY` if the file is open). `vfs_rename` moves a file or directory within
+one filesystem (an existing target returns `EEXIST`; cross-filesystem moves return `EROFS`). `vfs_sync`
+forces a flush. Terminal exposes these as `rm`, `mv` and `sync`.
 
 ## Errors
 
@@ -54,10 +117,14 @@ There is no delete or rename in 0.1.
 | `EBADF` / `EMFILE` | invalid handle / more than 32 open files |
 | `ENOMEM` | heap exhausted |
 | `EBADARCHIVE` | invalid initramfs |
+| `EBUSY` | file is open (remove/rename) |
+| `ENOTEMPTY` | directory not empty (remove) |
+| `EIO` | data disk error or offline |
 
 ## Limits
 
-RAM files: 64 KiB per file, 2 MiB total reserved capacity, 512 nodes.
+RAM files: 64 KiB per file, 2 MiB total reserved capacity, 512 nodes. Disk
+files: 64 KiB per file and 512 entries, total limited by the disk size.
 Notes edits at most 16 KiB; larger files are refused with a clear message.
 
 ## Initramfs format (AURFS v1)

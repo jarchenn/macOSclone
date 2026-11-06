@@ -11,6 +11,8 @@
 #include "arch/x86_64/io.h"
 #include "memory/heap.h"
 #include "core/sched.h"
+#include "drivers/acpi.h"
+#include "fs/vfs.h"
 #include "lib.h"
 
 static struct surface wallpaper;
@@ -24,6 +26,8 @@ static struct event_queue events;
 
 /* Interaction state; windows are referenced by id and re-validated. */
 static uint32_t drag_id, capture_id, hover_win_id;
+static uint32_t resize_id;
+static struct rect resize_ghost;
 static int32_t drag_off_x, drag_off_y;
 static uint32_t ctrl_press_id;
 static int ctrl_press_which; /* 1 close, 2 minimize, 3 maximize */
@@ -32,6 +36,7 @@ static uint64_t last_click_ms;
 static int32_t last_click_x, last_click_y;
 static uint32_t last_click_win;
 static bool reboot_requested;
+static bool poweroff_requested;
 static uint64_t last_second;
 
 /* Menus */
@@ -46,7 +51,7 @@ struct menu_item {
     const char *shortcut;
     int action;
 };
-enum { ACT_NONE = 0, ACT_ABOUT, ACT_SETTINGS, ACT_THEME, ACT_REBOOT, ACT_MINIMIZE, ACT_CLOSE, ACT_CYCLE, ACT_WELCOME };
+enum { ACT_NONE = 0, ACT_ABOUT, ACT_SETTINGS, ACT_THEME, ACT_REBOOT, ACT_MINIMIZE, ACT_CLOSE, ACT_CYCLE, ACT_WELCOME, ACT_POWEROFF };
 
 static struct menu_item aurora_items[] = {
     { "About Aurora", "", ACT_ABOUT },
@@ -55,6 +60,7 @@ static struct menu_item aurora_items[] = {
     { "Dark Appearance", "", ACT_THEME },
     { NULL, NULL, ACT_NONE }, /* separator */
     { "Restart", "", ACT_REBOOT },
+    { "Shut Down", "", ACT_POWEROFF },
 };
 static struct menu_item app_items[] = {
     { "Minimize", "Ctrl+M", ACT_MINIMIZE },
@@ -72,6 +78,7 @@ uint64_t desktop_now_ms(void) { return time_ms(); }
 void desktop_damage(struct rect r) { compositor_damage(r); }
 void desktop_damage_all(void) { compositor_damage_all(); }
 void desktop_request_reboot(void) { reboot_requested = true; }
+void desktop_request_poweroff(void) { poweroff_requested = true; }
 
 void desktop_input_stats(uint32_t *dropped, uint32_t *coalesced)
 {
@@ -272,6 +279,12 @@ static void compose(struct surface *s, struct rect clip)
     }
     paint_menubar(s);
     paint_dock(s);
+    if (resize_id) {
+        /* Outline of the size the window will get on release. */
+        draw_blend(s, resize_ghost, g_theme->accent, 28);
+        draw_frame(s, resize_ghost, g_theme->accent);
+        draw_frame(s, rect_inset(resize_ghost, 1), g_theme->accent);
+    }
     paint_menu(s);
     paint_cursor(s);
 }
@@ -310,6 +323,7 @@ static void run_action(int act)
         desktop_theme_changed();
         break;
     case ACT_REBOOT: desktop_request_reboot(); break;
+    case ACT_POWEROFF: desktop_request_poweroff(); break;
     case ACT_MINIMIZE: if (f) wm_minimize(f); break;
     case ACT_CLOSE: if (f) wm_request_close(f); break;
     case ACT_CYCLE: wm_cycle(); break;
@@ -392,6 +406,11 @@ static void handle_press(void)
     if (!w)
         return;
     wm_focus(w);
+    if (w->state == WIN_NORMAL && cur_x >= w->frame.x + w->frame.w - WM_GRIP && cur_y >= w->frame.y + w->frame.h - WM_GRIP) {
+        resize_id = w->id;
+        resize_ghost = w->frame;
+        return;
+    }
     if (cur_y < w->frame.y + TITLE_H) {
         int c = control_at(w, cur_x, cur_y);
         if (c) {
@@ -462,6 +481,14 @@ static void handle_release(void)
         }
         return;
     }
+    if (resize_id) {
+        struct window *w = wm_get(resize_id);
+        resize_id = 0;
+        compositor_damage(rect_inset(resize_ghost, -2));
+        if (w)
+            wm_resize(w, resize_ghost.w, resize_ghost.h);
+        return;
+    }
     if (drag_id) {
         struct window *w = wm_get(drag_id);
         drag_id = 0;
@@ -479,6 +506,21 @@ static void handle_release(void)
 
 static void handle_motion(void)
 {
+    if (resize_id) {
+        struct window *w = wm_get(resize_id);
+        if (!w) {
+            resize_id = 0;
+            return;
+        }
+        struct rect wa = wm_work_area();
+        struct rect g = resize_ghost;
+        compositor_damage(rect_inset(g, -2));
+        g.w = CLAMP(cur_x - w->frame.x + 1, WM_MIN_W, wa.w);
+        g.h = CLAMP(cur_y - w->frame.y + 1, WM_MIN_H, MAX(WM_MIN_H, wa.y + wa.h - w->frame.y));
+        resize_ghost = g;
+        compositor_damage(rect_inset(g, -2));
+        return;
+    }
     if (drag_id) {
         struct window *w = wm_get(drag_id);
         if (w)
@@ -593,6 +635,8 @@ static void handle_key(const struct key_event *e)
 {
     if (!e->pressed)
         return;
+    if (e->key == KEY_CAPSLOCK)
+        ps2_set_leds((e->mods & MOD_CAPS) != 0);
     TEST_EVENT("KEY key=%u ascii=%u mods=%u", e->key, e->ascii, e->mods);
     if (handle_shortcut(e))
         return;
@@ -718,6 +762,15 @@ void desktop_main(void)
         compositor_frame();
         if (reboot_requested)
             do_reboot();
+        if (poweroff_requested) {
+            poweroff_requested = false;
+            int s = vfs_sync();
+            klog("desktop: power off requested (sync %s)", s ? vfs_strerror(s) : "ok");
+            TEST_EVENT("POWEROFF");
+            acpi_poweroff();
+            outw(0x604, 0x2000); /* QEMU PIIX4 PM fallback */
+            klog("desktop: power-off did not take effect; it is safe to turn the machine off");
+        }
 
         /* Race-free idle: interrupts are disabled while checking for work;
          * the desktop task then blocks until an input IRQ, a process write or

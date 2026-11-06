@@ -115,6 +115,59 @@ TEST(textbuf_capacity)
     CHECK_EQ(tb.cursor, 0);
 }
 
+TEST(textbuf_selection_clipboard)
+{
+    size_t a, b, n;
+    tb_init(&tb);
+    CHECK(tb_insert_text(&tb, "hello world", 11));
+    CHECK(!tb_selection(&tb, &a, &b));
+    tb_home(&tb);
+    tb_select_begin(&tb);
+    for (int i = 0; i < 5; i++)
+        tb_right(&tb);
+    CHECK(tb_selection(&tb, &a, &b));
+    CHECK_EQ(a, 0);
+    CHECK_EQ(b, 5);
+    CHECK(clipboard_set(tb.data + a, b - a));
+    CHECK(tb_insert(&tb, 'J')); /* typing replaces the selection */
+    CHECK_EQ(tb.len, 7);
+    CHECK(memcmp(tb.data, "J world", 7) == 0);
+    tb_end(&tb);
+    const char *c = clipboard_get(&n);
+    CHECK_EQ(n, 5);
+    CHECK(tb_insert_text(&tb, c, n));
+    CHECK(memcmp(tb.data, "J worldhello", 12) == 0);
+    /* Backwards selection, then backspace deletes it. */
+    tb_select_begin(&tb);
+    tb_left(&tb);
+    tb_left(&tb);
+    CHECK(tb_selection(&tb, &a, &b));
+    CHECK_EQ(a, 10);
+    CHECK_EQ(b, 12);
+    CHECK(tb_backspace(&tb));
+    CHECK_EQ(tb.len, 10);
+    CHECK_EQ(tb.cursor, 10);
+    CHECK(!tb_selection(&tb, &a, &b));
+    tb_select_all(&tb);
+    CHECK(tb_selection(&tb, &a, &b));
+    CHECK_EQ(b - a, 10);
+    CHECK(tb_delete(&tb));
+    CHECK_EQ(tb.len, 0);
+    /* A paste that does not fit is refused without changes. */
+    static char big[TEXTBUF_CAP];
+    memset(big, 'z', sizeof big);
+    CHECK(tb_insert_text(&tb, "ab", 2));
+    CHECK(!tb_insert_text(&tb, big, TEXTBUF_CAP - 1));
+    CHECK_EQ(tb.len, 2);
+    tb_select_all(&tb); /* replacing the whole buffer fits exactly */
+    CHECK(tb_insert_text(&tb, big, TEXTBUF_CAP));
+    CHECK_EQ(tb.len, TEXTBUF_CAP);
+    CHECK(clipboard_set(big, CLIPBOARD_CAP));
+    CHECK(!clipboard_set(big, CLIPBOARD_CAP + 1));
+    clipboard_get(&n);
+    CHECK_EQ(n, CLIPBOARD_CAP);
+}
+
 TEST(format)
 {
     char b[64];
@@ -142,5 +195,6 @@ void run_tests(void)
     RUN(cmdline_limits);
     RUN(textbuf_editing);
     RUN(textbuf_capacity);
+    RUN(textbuf_selection_clipboard);
     RUN(format);
 }

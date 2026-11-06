@@ -30,7 +30,7 @@ import make_initramfs  # noqa: E402
 
 ROOT = env.ROOT
 BUILD = env.BUILD
-VERSION = "0.1.0"
+VERSION = "0.4.0"
 
 VARIANTS = {
     "release": [],

@@ -1,6 +1,7 @@
 /* Terminal: a built-in command interpreter (not a POSIX shell). */
 #include "desktop/desktop.h"
 #include "apps/cmdline.h"
+#include "apps/textbuf.h"
 #include "apps/app_util.h"
 #include "fs/vfs.h"
 #include "core/log.h"
@@ -137,7 +138,7 @@ static void cmd_help(void)
         "  <prog> [args]        same as run, for programs in /system/bin",
         "  ps / kill <pid>      list / stop user processes",
         "  ifconfig / netstat   network interface / sockets; see ping, nslookup, fetch",
-        "  reboot               restart the machine",
+        "  reboot / poweroff    restart / switch off the machine (ACPI S5)",
         "Quote arguments with \"...\"; inside quotes \\n is a newline.",
         "PgUp/PgDn scroll, Up/Down history. Ctrl+C cancels the line or stops the",
         "foreground program; Ctrl+D sends it end-of-input.",
@@ -549,7 +550,7 @@ static void execute(const char *line)
     else if (!strcmp(c, "about")) cmd_about();
     else if (!strcmp(c, "uname")) {
         if (cl.argc > 1 && !strcmp(cl.argv[1], "-a"))
-            outf(C_TEXT, "Aurora %s x86_64 %s-build %s (single-address-space kernel)", AURORA_VERSION, AURORA_VARIANT, AURORA_BUILD_ID);
+            outf(C_TEXT, "Aurora %s x86_64 %s-build %s (preemptive, isolated processes)", AURORA_VERSION, AURORA_VARIANT, AURORA_BUILD_ID);
         else
             out_color(C_TEXT, "Aurora");
     }
@@ -655,6 +656,10 @@ static void execute(const char *line)
         outf(fr ? C_ERROR : C_DIM, "testfill: %s %u bytes: %s", cl.argv[1], n, vfs_strerror(fr));
     }
 #endif
+    else if (!strcmp(c, "poweroff") || !strcmp(c, "shutdown")) {
+        out_color(C_DIM, "powering off...");
+        desktop_request_poweroff();
+    }
     else if (!strcmp(c, "reboot")) {
         out_color(C_DIM, "restarting...");
         desktop_request_reboot();
@@ -912,6 +917,24 @@ static void key(struct window *w, const struct key_event *e)
             out_color(C_DIM, line);
             T.in_len = T.in_cur = 0;
             T.input[0] = '\0';
+        } else if (e->ascii == 'v' || e->ascii == 'V') {
+            /* Paste the clipboard's first line; control characters become
+             * spaces and the input line limit still applies. */
+            size_t n, added = 0;
+            const char *clip = clipboard_get(&n);
+            for (size_t i = 0; i < n && clip[i] != '\n' && clip[i] != '\r'; i++) {
+                if (T.in_len >= CMD_LINE_MAX) {
+                    outf(C_ERROR, "paste truncated at the input limit (%d characters)", CMD_LINE_MAX);
+                    break;
+                }
+                char ch = (clip[i] >= 32 && clip[i] < 127) ? clip[i] : ' ';
+                memmove(T.input + T.in_cur + 1, T.input + T.in_cur, T.in_len - T.in_cur + 1);
+                T.input[T.in_cur++] = ch;
+                T.in_len++;
+                added++;
+            }
+            TEST_EVENT("TERM_PASTE added=%zu len=%zu", added, T.in_len);
+            (void)added; /* only reported in the test build */
         }
         wm_invalidate(w);
         return;

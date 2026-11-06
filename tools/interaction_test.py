@@ -726,6 +726,130 @@ def s_process_leaks(d):
     return f"10 process lifetimes: free physical memory {before} -> {after} KiB"
 
 
+WM_MIN_W, WM_MIN_H = 320, 180  # kernel/include/desktop/desktop.h
+
+
+def s_window_resize(d):
+    open_notes_fresh(d)
+    w = d.window("Notes")
+    if w["state"] != "normal":
+        raise GuestError(f"Notes is {w['state']}")
+    gx, gy = w["x"] + w["w"] - 4, w["y"] + w["h"] - 4
+    results = []
+    for nw, nh in ((w["w"] - 120, w["h"] - 80), (WM_MIN_W, WM_MIN_H), (w["w"], w["h"])):
+        # the window's lower-right pixel lands under the cursor on release
+        tx, ty = w["x"] + nw - 1, w["y"] + nh - 1
+        if nw == WM_MIN_W:  # drag past the minimum: it clamps
+            tx, ty = w["x"] + 40, w["y"] + 40
+        since = d.g.mark()
+        d.drag(gx, gy, tx, ty)
+        m = d.g.wait_for(r"@@WIN id=\d+ app=Notes x=-?\d+ y=-?\d+ w=(\d+) h=(\d+) state=normal", timeout=10, since=since)
+        got = (int(m.group(1)), int(m.group(2)))
+        if got != (nw, nh):
+            raise GuestError(f"resize to {(nw, nh)} gave {got}")
+        results.append(got)
+        gx, gy = w["x"] + got[0] - 4, w["y"] + got[1] - 4
+    # the resized window still works
+    d.g.type_text("ok")
+    d.g.screendump(OUT / "resized.png")
+    since = d.g.mark()
+    d.g.key("ctrl", "n")
+    d.g.wait_for(r"@@NOTES_DIALOG unsaved", timeout=10, since=since)
+    d.g.key("d")
+    return f"grip drags gave {results} (minimum clamp {WM_MIN_W}x{WM_MIN_H})"
+
+
+CLIP_TEXT = "copy me please\nsecond line"
+
+
+def s_clipboard(d):
+    open_notes_fresh(d)
+    d.g.type_text(CLIP_TEXT)
+    # Shift+Home selects the last line; Ctrl+C copies it.
+    d.g.key("shift", "home")
+    since = d.g.mark()
+    d.g.key("ctrl", "c")
+    m = d.g.wait_for(r"@@CLIP_SET len=(\d+) crc=([0-9a-f]+)", timeout=10, since=since)
+    if (int(m.group(1)), m.group(2)) != (11, crc("second line")):
+        raise GuestError(f"copied {m.group(0)}, expected 'second line'")
+    # Typing replaces the selection; Ctrl+A, Ctrl+X empties the note.
+    d.g.type_text("2nd")
+    d.g.key("ctrl", "a")
+    since = d.g.mark()
+    d.g.key("ctrl", "x")
+    m = d.g.wait_for(r"@@CLIP_SET len=(\d+) crc=([0-9a-f]+)", timeout=10, since=since)
+    want = "copy me please\n2nd"
+    if (int(m.group(1)), m.group(2)) != (len(want), crc(want)):
+        raise GuestError(f"cut {m.group(0)}, expected {want!r}")
+    # Paste twice: the note must be exactly two copies.
+    d.g.key("ctrl", "v")
+    d.g.key("ctrl", "v")
+    m = save_as(d, "clip.txt")
+    if m.group(2) != "0" or int(m.group(3)) != 2 * len(want) or m.group(4) != crc(want + want):
+        raise GuestError(f"pasted note differs: {m.group(0)}")
+    # Mouse selection: double-click a word, then drag across a range.
+    def text_pt(col, row):  # kernel/apps/notes.c: PAD 14, text at TOOLBAR_H + 8, LINE_H 18
+        return d.content_point("Notes", 14 + 8 * col, TOOLBAR_H + 8 + 18 * row + 9)
+    d.click(*text_pt(1, 0), double=True)
+    since = d.g.mark()
+    d.g.key("ctrl", "c")
+    m = d.g.wait_for(r"@@CLIP_SET len=(\d+) crc=([0-9a-f]+)", timeout=10, since=since)
+    if (int(m.group(1)), m.group(2)) != (4, crc("copy")):
+        raise GuestError(f"double-click copied {m.group(0)}, expected 'copy'")
+    d.drag(*text_pt(5, 0), *text_pt(14, 0))
+    since = d.g.mark()
+    d.g.key("ctrl", "c")
+    m = d.g.wait_for(r"@@CLIP_SET len=(\d+) crc=([0-9a-f]+)", timeout=10, since=since)
+    if (int(m.group(1)), m.group(2)) != (9, crc("me please")):
+        raise GuestError(f"drag copied {m.group(0)}, expected 'me please'")
+    d.g.key("ctrl", "a")
+    since = d.g.mark()
+    d.g.key("ctrl", "c")  # restore the clipboard for the Terminal check
+    d.g.wait_for(r"@@CLIP_SET len=36 ", timeout=10, since=since)
+    # Terminal paste takes the first line only.
+    term_focus(d)
+    d.g.type_text("echo [")
+    since = d.g.mark()
+    d.g.key("ctrl", "v")
+    d.g.wait_for(r"@@TERM_PASTE added=14 ", timeout=10, since=since)
+    d.g.type_text("]\n")
+    d.g.wait_for(r"@@TERM \[copy me please\]\s*$", timeout=10, since=since)
+    d.terminal("rm /home/notes/clip.txt")
+    return (f"copy/cut/paste in Notes ({2 * len(want)} B saved, crc ok); double-click and drag selection; "
+            "Terminal pasted the first line")
+
+
+def s_caps_led(d):
+    term_focus(d)
+    d.g.type_text("echo ")
+    since = d.g.mark()
+    d.g.key("caps_lock")
+    d.g.wait_for(r"@@KBD_LEDS caps=1 ", timeout=10, since=since)
+    d.g.key("a")
+    d.g.key("b")
+    since2 = d.g.mark()
+    d.g.key("caps_lock")
+    d.g.wait_for(r"@@KBD_LEDS caps=0 ", timeout=10, since=since2)
+    d.g.type_text("c\n")
+    d.g.wait_for(r"@@TERM ABc\s*$", timeout=10, since=since)
+    return "Caps Lock set and cleared the keyboard LED; letters followed it"
+
+
+def s_poweroff(d):
+    term_focus(d)
+    since = d.g.mark()
+    d.g.type_text("poweroff\n")
+    d.g.wait_for(r"@@POWEROFF", timeout=10, since=since)
+    t0 = time.time()
+    while d.g.alive() and time.time() - t0 < 20:
+        time.sleep(0.1)
+    if d.g.alive():
+        raise GuestError("QEMU still running 20 s after poweroff")
+    if "acpi: entering S5" not in d.g.serial():
+        raise GuestError("power-off did not go through ACPI S5")
+    return f"ACPI S5: QEMU exited {time.time() - t0:.1f} s after the command"
+
+
 SCENARIOS = [
     ("launch-each-app", s_launch_each_app),
     ("drag-overlap-focus", s_drag_overlap_focus),
@@ -745,7 +869,11 @@ SCENARIOS = [
     ("crash-does-not-stop-others", s_crash_does_not_stop_others),
     ("stdin-shell-ctrl-c", s_stdin_and_shell),
     ("process-memory-reclaimed", s_process_leaks),
+    ("window-resize", s_window_resize),
+    ("clipboard-copy-paste", s_clipboard),
+    ("caps-lock-led", s_caps_led),
     ("reboot-resets-ramfs", s_reboot),
+    ("acpi-poweroff", s_poweroff),  # last: ends the guest
 ]
 
 

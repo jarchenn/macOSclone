@@ -103,6 +103,27 @@ static bool dev_send(bool aux, uint8_t v)
     return false;
 }
 
+static uint32_t led_updates;
+uint32_t ps2_led_updates(void) { return led_updates; }
+
+void ps2_set_leds(bool caps)
+{
+    if (!have_kbd)
+        return;
+    /* Bit 2 = Caps Lock. The keyboard ACKs each byte with 0xFA, which the
+     * decoder discards; we only wait for the input buffer to drain. */
+    uint64_t f = irq_save();
+    if (wait_write()) {
+        outb(DATA, 0xED);
+        if (wait_write()) {
+            outb(DATA, caps ? 0x04 : 0x00);
+            led_updates++;
+            TEST_EVENT("KBD_LEDS caps=%d n=%u", caps ? 1 : 0, led_updates);
+        }
+    }
+    irq_restore(f);
+}
+
 static void kbd_irq(void)
 {
     for (int i = 0; i < 16; i++) {
