@@ -6,7 +6,7 @@
  * arguments in rdi, rsi, rdx, r10, r8. The result is returned in rax; values
  * in [-4095, -1] are errors. All other registers are preserved.
  *
- * Errors -1 .. -13 are VFS errors (see fs/vfs.h); kernel-wide errors start at
+ * Errors -1 .. -99 are VFS errors (see fs/vfs.h); kernel-wide errors start at
  * -100. Only fixed-width types are used in structures. */
 #include <stdint.h>
 
@@ -32,11 +32,14 @@ enum aurora_syscall {
     SYS_SEND = 22,     /* (int sock, const void *buf, uint64 len) -> bytes */
     SYS_RECV = 23,     /* (int sock, void *buf, uint64 len, uint64 timeout_ms) -> bytes (0 = closed) */
     SYS_SOCKCLOSE = 24,/* (int sock) */
-    SYS_RESOLVE = 25,  /* (const char *name, uint32 *ipv4_be, uint64 timeout_ms) */
+    SYS_RESOLVE = 25,  /* (const char *name, uint32 *ipv4_be, uint64 timeout_ms, uint32 server_be, uint16 port)
+                        * server 0 = the DHCP-provided DNS server */
     SYS_BIND = 26,     /* (int sock, uint16 port) UDP only */
     SYS_SENDTO = 27,   /* (int sock, const void *buf, uint64 len, uint32 ip, uint16 port) */
     SYS_RECVFROM = 28, /* (int sock, void *buf, uint64 len, struct aurora_sockaddr *, uint64 timeout_ms) */
-    SYS_COUNT = 29,
+    SYS_NETINFO = 29,  /* (struct aurora_netinfo *) */
+    SYS_PING = 30,     /* (uint32 ipv4_be, uint16 seq, uint64 timeout_ms) -> round trip ms */
+    SYS_COUNT = 31,
 };
 
 #define AURORA_O_READ 1u
@@ -84,6 +87,14 @@ struct aurora_sockaddr {
     uint32_t ipv4_be;
     uint16_t port;
     uint16_t reserved;
+};
+
+struct aurora_netinfo {
+    uint8_t up, configured, reserved[2];
+    uint8_t mac[6];
+    uint16_t reserved2;
+    uint32_t ip, netmask, gateway, dns; /* network byte order */
+    uint64_t rx_packets, tx_packets;
 };
 
 /* User address space layout */

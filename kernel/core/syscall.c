@@ -232,7 +232,7 @@ static int sock_of(struct process *p, uint64_t fd)
     return (d && d->kind == FD_SOCKET) ? d->handle : AE_BADF;
 }
 
-static long sys_resolve(struct process *p, uint64_t uname, uint64_t uip, uint64_t timeout)
+static long sys_resolve(struct process *p, uint64_t uname, uint64_t uip, uint64_t timeout, uint64_t server, uint64_t port)
 {
     char name[128];
     int r = copy_string_from_user(p, uname, name, sizeof name);
@@ -241,7 +241,10 @@ static long sys_resolve(struct process *p, uint64_t uname, uint64_t uip, uint64_
     if (!user_range_ok(p, uip, 4, true))
         return AE_FAULT;
     uint32_t ip = 0;
-    r = net_resolve(name, &ip, timeout ? timeout : 3000);
+    if (server)
+        r = net_resolve_via(name, (uint32_t)server, port ? (uint16_t)port : 53, &ip, timeout ? timeout : 3000);
+    else
+        r = net_resolve(name, &ip, timeout ? timeout : 3000);
     if (r)
         return r;
     return copy_to_user(p, uip, &ip, 4);
@@ -293,7 +296,7 @@ void syscall_dispatch(struct interrupt_frame *f)
         break;
     }
     case SYS_SOCKCLOSE: r = sys_close(p, a); break;
-    case SYS_RESOLVE: r = sys_resolve(p, a, b, c); break;
+    case SYS_RESOLVE: r = sys_resolve(p, a, b, c, d, e); break;
     case SYS_BIND: {
         int s = sock_of(p, a);
         r = s < 0 ? s : sock_bind(s, (uint16_t)b);
@@ -316,6 +319,29 @@ void syscall_dispatch(struct interrupt_frame *f)
             if (r >= 0 && d)
                 memcpy((void *)(uintptr_t)d, &from, sizeof from);
         }
+        break;
+    }
+    case SYS_NETINFO: {
+        const struct net_config *nc = net_info();
+        struct aurora_netinfo ni;
+        memset(&ni, 0, sizeof ni);
+        ni.up = nc->up;
+        ni.configured = nc->configured;
+        memcpy(ni.mac, nc->mac, 6);
+        ni.ip = nc->ip;
+        ni.netmask = nc->netmask;
+        ni.gateway = nc->gateway;
+        ni.dns = nc->dns;
+        ni.rx_packets = nc->rx_packets;
+        ni.tx_packets = nc->tx_packets;
+        r = copy_to_user(p, a, &ni, sizeof ni);
+        break;
+    }
+    case SYS_PING: {
+        uint64_t rtt = 0;
+        r = net_ping((uint32_t)a, (uint16_t)b, c ? MIN(c, 30000ull) : 2000, &rtt);
+        if (r == 0)
+            r = (long)rtt;
         break;
     }
     default: r = AE_NOSYS; break;

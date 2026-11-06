@@ -46,9 +46,12 @@ int connect(int s, uint32_t ip_be, uint16_t port, uint64_t timeout_ms);
 long send(int s, const void *buf, size_t len);
 long recv(int s, void *buf, size_t len, uint64_t timeout_ms);
 int resolve(const char *name, uint32_t *ip_be, uint64_t timeout_ms);
+int resolve_via(const char *name, uint32_t *ip_be, uint64_t timeout_ms, uint32_t server_be, uint16_t port);
 int bind(int s, uint16_t port);
 long sendto(int s, const void *buf, size_t len, uint32_t ip_be, uint16_t port);
 long recvfrom(int s, void *buf, size_t len, struct aurora_sockaddr *from, uint64_t timeout_ms);
+int netinfo(struct aurora_netinfo *out);
+long ping(uint32_t ip_be, uint16_t seq, uint64_t timeout_ms); /* round trip ms or error */
 bool parse_ipv4(const char *s, uint32_t *ip_be);
 void format_ipv4(uint32_t ip_be, char *buf, size_t cap);
 

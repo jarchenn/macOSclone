@@ -84,6 +84,7 @@ HOST_TEST_SOURCES = [
     "kernel/memory/physical.c",
     "kernel/core/elf.c",
     "kernel/fs/pfs.c",
+    "kernel/net/proto.c",
 ]
 
 

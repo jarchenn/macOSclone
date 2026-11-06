@@ -15,6 +15,7 @@ import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.stdout.reconfigure(errors="replace")  # guest output may contain any bytes
 import aurora_env as env  # noqa: E402
 from qemu_harness import Guest, GuestError  # noqa: E402
 

@@ -136,6 +136,7 @@ static void cmd_help(void)
         "  run <prog> [args] [&] start a user program from /system/bin (& = background)",
         "  <prog> [args]        same as run, for programs in /system/bin",
         "  ps / kill <pid>      list / stop user processes",
+        "  ifconfig / netstat   network interface / sockets; see ping, nslookup, fetch",
         "  reboot               restart the machine",
         "Quote arguments with \"...\"; inside quotes \\n is a newline.",
         "PgUp/PgDn scroll, Up/Down history. Ctrl+C cancels the line or stops the",
@@ -240,13 +241,15 @@ static void cmd_cat(int argc, char **argv)
             size_t len;
             r = vfs_read_file(path, buf, RAMFS_MAX_FILE, &len);
             if (r == VFS_OK) {
+                uint32_t sum = crc32(buf, len); /* of the real bytes, before display clean-up */
+                UNUSED(sum);
                 buf[len] = '\0';
                 for (size_t i = 0; i < len; i++)
                     if (buf[i] == '\0' || buf[i] == '\r' || buf[i] == '\t')
                         buf[i] = ' ';
                 if (len)
                     out_color(C_TEXT, buf);
-                TEST_EVENT("CAT path=%s len=%zu crc=%08x", path, len, crc32(buf, len));
+                TEST_EVENT("CAT path=%s len=%zu crc=%08x", path, len, sum);
                 continue;
             }
         }
@@ -708,6 +711,29 @@ static void execute(const char *line)
         else
             outf(C_TEXT, "/home  RAM        %u KiB used of %u KiB (lost on restart)", u.ram_bytes / 1024, RAMFS_MAX_TOTAL / 1024);
         out_color(C_TEXT, "/system  initramfs  read-only");
+    }
+    else if (!strcmp(c, "ifconfig")) {
+        const struct net_config *nc = net_info();
+        if (!nc->up) {
+            out_color(C_TEXT, "net0: no network card (start QEMU with a virtio-net device)");
+        } else {
+            char ip[16], mask[16], gw[16], dns[16];
+            net_format_ip(nc->ip, ip, sizeof ip);
+            net_format_ip(nc->netmask, mask, sizeof mask);
+            net_format_ip(nc->gateway, gw, sizeof gw);
+            net_format_ip(nc->dns, dns, sizeof dns);
+            outf(C_TEXT, "net0: %s  mac %02x:%02x:%02x:%02x:%02x:%02x  %s", nc->driver, nc->mac[0], nc->mac[1],
+                 nc->mac[2], nc->mac[3], nc->mac[4], nc->mac[5], nc->configured ? "configured (DHCP)" : "not configured");
+            if (nc->configured)
+                outf(C_TEXT, "      inet %s  netmask %s  gateway %s  dns %s", ip, mask, gw, dns);
+            outf(C_TEXT, "      rx %llu packets (%llu dropped)  tx %llu packets (%llu errors)",
+                 (unsigned long long)nc->rx_packets, (unsigned long long)nc->rx_dropped,
+                 (unsigned long long)nc->tx_packets, (unsigned long long)nc->tx_errors);
+        }
+    }
+    else if (!strcmp(c, "netstat")) {
+        outf(C_TEXT, "%d socket(s) open", sock_count());
+        out_color(C_DIM, "network commands: ping, nslookup, fetch, tcpecho, udpecho (in /system/bin)");
     }
     else if (!strcmp(c, "run")) run_program(cl.argc, cl.argv, 1);
     else if (!strcmp(c, "ps")) cmd_ps();

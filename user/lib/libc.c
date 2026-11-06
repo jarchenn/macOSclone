@@ -61,9 +61,13 @@ int connect(int s, uint32_t ip, uint16_t port, uint64_t t) { return (int)__sysca
 long send(int s, const void *buf, size_t len) { return __syscall(SYS_SEND, s, (long)buf, (long)len, 0, 0); }
 long recv(int s, void *buf, size_t len, uint64_t t) { return __syscall(SYS_RECV, s, (long)buf, (long)len, (long)t, 0); }
 int resolve(const char *name, uint32_t *ip, uint64_t t) { return (int)__syscall(SYS_RESOLVE, (long)name, (long)ip, (long)t, 0, 0); }
+int resolve_via(const char *name, uint32_t *ip, uint64_t t, uint32_t server, uint16_t port) { return (int)__syscall(SYS_RESOLVE, (long)name, (long)ip, (long)t, server, port); }
 int bind(int s, uint16_t port) { return (int)__syscall(SYS_BIND, s, port, 0, 0, 0); }
 long sendto(int s, const void *buf, size_t len, uint32_t ip, uint16_t port) { return __syscall(SYS_SENDTO, s, (long)buf, (long)len, ip, port); }
 long recvfrom(int s, void *buf, size_t len, struct aurora_sockaddr *from, uint64_t t) { return __syscall(SYS_RECVFROM, s, (long)buf, (long)len, (long)from, (long)t); }
+
+int netinfo(struct aurora_netinfo *out) { return (int)__syscall(SYS_NETINFO, (long)out, 0, 0, 0, 0); }
+long ping(uint32_t ip, uint16_t seq, uint64_t t) { return __syscall(SYS_PING, ip, seq, (long)t, 0, 0); }
 
 int snprintf(char *buf, size_t cap, const char *fmt, ...)
 {
