@@ -4,6 +4,8 @@
 #include "arch/x86_64/io.h"
 #include "drivers/pic.h"
 #include "core/panic.h"
+#include "core/process.h"
+#include "core/sched.h"
 
 static irq_handler_t irq_handlers[16];
 static uint64_t spurious_count;
@@ -22,10 +24,19 @@ void interrupt_dispatch(struct interrupt_frame *f);
 void interrupt_dispatch(struct interrupt_frame *f)
 {
     uint64_t v = f->vector;
-    if (v < 32)
-        panic_exception(f); /* never returns */
+    bool from_user = (f->cs & 3) == 3;
+    if (v < 32) {
+        if (from_user)
+            process_fault(f); /* kills the process; the kernel carries on */
+        panic_exception(f);   /* a fault in kernel mode is fatal */
+    }
 
-    if (v >= IRQ_BASE && v < IRQ_BASE + 16) {
+    if (v == SYSCALL_VECTOR) {
+        if (from_user)
+            syscall_dispatch(f);
+        else
+            unexpected_count++;
+    } else if (v >= IRQ_BASE && v < IRQ_BASE + 16) {
         unsigned irq = (unsigned)(v - IRQ_BASE);
         if (pic_is_spurious(irq)) {
             spurious_count++;
@@ -35,8 +46,12 @@ void interrupt_dispatch(struct interrupt_frame *f)
             irq_handlers[irq]();
         else
             unexpected_count++;
-        pic_eoi(irq);
-        return;
+        pic_eoi(irq); /* before any task switch, or the PIC stays blocked */
+    } else {
+        unexpected_count++;
     }
-    unexpected_count++;
+    /* Only user mode and the idle task are preemptible (see sched.h). */
+    sched_preempt_point(from_user);
+    if (from_user)
+        process_check_kill();
 }

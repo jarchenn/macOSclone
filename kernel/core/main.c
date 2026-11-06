@@ -15,6 +15,8 @@
 #include "memory/virtual.h"
 #include "memory/heap.h"
 #include "fs/vfs.h"
+#include "core/sched.h"
+#include "net/net.h"
 #include "desktop/desktop.h"
 #include "lib.h"
 #include "limine.h"
@@ -115,6 +117,7 @@ static NORETURN void kmain_stage2(void)
     kheap_init();
     selftest_heap();
     klog("AURORA_MILESTONE memory");
+    sched_init();
 
     pic_init();
     lapic_virtual_wire(g_vmm.lapic);
@@ -153,6 +156,7 @@ static NORETURN void kmain_stage2(void)
     if (vfs_stat("/home/notes", &st) != VFS_OK)
         vfs_mkdir("/home/notes");
     klog("AURORA_MILESTONE vfs");
+    net_init();
 
     klog("AURORA_BOOT_OK");
     desktop_main();

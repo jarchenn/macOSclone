@@ -202,6 +202,18 @@ phys_addr_t pmm_alloc_page(void)
     return p;
 }
 
+phys_addr_t pmm_alloc_contig(size_t pages)
+{
+    uint64_t f = 0;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(f) : : "memory");
+    phys_addr_t p = pmm_core_alloc_contig(&g_pmm, pages);
+    if (f & (1u << 9))
+        __asm__ volatile("sti" ::: "memory");
+    if (p)
+        memset(phys_to_virt(p), 0, pages * PAGE_SIZE);
+    return p;
+}
+
 void pmm_free_page(phys_addr_t addr)
 {
     int r = pmm_core_free(&g_pmm, addr);

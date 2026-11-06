@@ -594,6 +594,137 @@ def s_soak(d, seconds):
     return f"{seconds}s, {n} random actions, no panic/reset"
 
 
+# ---- 0.2: user processes ----------------------------------------------------
+
+def term_focus(d):
+    since = d.g.mark()
+    d.dock_click("Terminal")
+    d.wait_focus("Terminal", since)
+
+
+def s_user_programs(d):
+    term_focus(d)
+    d.terminal("hello alpha beta", r"@@TERM Hello from user space! pid=\d+ argc=3 \[alpha\] \[beta\]")
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=hello status=0", timeout=10)
+    d.terminal("badptr", r"@@TERM badptr: 10/10 checks passed")
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=badptr status=0", timeout=10)
+    since = d.g.mark()
+    d.terminal("crash")
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=crash status=142 reason=segmentation fault: write unmapped at 0 ", timeout=10, since=since)
+    for mode, pat in (("kernel", r"read denied at ffffffff80000000"), ("stack", r"write unmapped at 7fff"),
+                      ("ud", r"invalid opcode"), ("gp", r"general protection fault")):
+        since = d.g.mark()
+        d.terminal(f"crash {mode}")
+        d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=crash status=1\d\d reason=.*" + pat, timeout=10, since=since)
+    # the kernel and desktop are still fine
+    d.terminal("uptime", r"@@TERM up \d+:\d\d:\d\d")
+    d.terminal("ls /system/bin", r"@@TERM spin ")
+    return "hello/badptr ran; 5 kinds of faults each killed only the faulting process"
+
+
+def s_memory_isolation(d):
+    term_focus(d)
+    since = d.g.mark()
+    d.terminal("memtest write SECRET-42 4000 &")
+    m = d.g.wait_for(r"@@TERM memtest: pid (\d+) wrote SECRET-42 at (0x[0-9a-f]+)", timeout=10, since=since)
+    writer, addr = m.group(1), m.group(2)
+    m2 = d.terminal("memtest read", r"@@TERM memtest: pid (\d+) reads (\S+) at (0x[0-9a-f]+)")
+    if m2.group(3) != addr or m2.group(2) != "untouched":
+        raise GuestError(f"isolation broken: reader saw {m2.group(2)!r} at {m2.group(3)} (writer {addr})")
+    since = d.g.mark()
+    d.terminal("memtest peek ffffffff80000000")
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=memtest status=142 reason=segmentation fault: read denied at ffffffff80000000", timeout=10, since=since)
+    d.terminal("memtest peek ffff800000100000")
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=memtest status=142 reason=segmentation fault: read denied at ffff800000100000", timeout=10, since=since)
+    d.g.wait_for(rf"@@TERM memtest: pid {writer} still sees SECRET-42", timeout=15, since=since)
+    d.g.wait_for(rf"@@PROC_EXIT pid={writer} name=memtest status=0", timeout=10, since=since)
+    return f"same VA {addr}: writer kept SECRET-42, reader saw its own 'untouched'; kernel/HHDM reads faulted"
+
+
+def s_concurrency(d):
+    term_focus(d)
+    since = d.g.mark()
+    d.terminal("spin &")
+    spin = d.g.wait_for(r"@@PROC_START pid=(\d+) name=spin", timeout=10, since=since).group(1)
+    d.terminal("counter 5 200 B &")
+    # The CPU hog does not starve sleeping programs or the desktop.
+    d.g.wait_for(r"@@TERM B 5\s*$", timeout=20, since=since)
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=counter status=0", timeout=10, since=since)
+    d.g.wait_for(r"@@TERM spin: \d+ M iterations after [2-9]\d\d\d ms", timeout=20, since=since)
+    s2 = d.g.mark()
+    d.dock_click("Files")
+    d.wait_focus("Files", s2)
+    term_focus(d)
+    d.terminal("ps", rf"@@TERM +{spin} +running")
+    m = re.findall(rf"@@TERM +{spin} +running +(\d+)", d.g.serial())
+    cpu = int(m[-1])
+    since = d.g.mark()
+    d.terminal(f"kill {spin}")
+    d.g.wait_for(rf"@@PROC_EXIT pid={spin} name=spin status=-1 reason=killed", timeout=10, since=since)
+    d.terminal("ps", r"@@TERM +\(no user processes\)")
+    since = d.g.mark()
+    d.dock_click("Files")
+    d.wait_focus("Files", since)
+    since = d.g.mark()
+    d.g.key("ctrl", "w")  # close Files
+    d.g.wait_for(r"@@WIN_CLOSE id=\d+", timeout=10, since=since)
+    return f"spin used {cpu} ms CPU while counter finished and the desktop opened Files; kill worked"
+
+
+def s_crash_does_not_stop_others(d):
+    term_focus(d)
+    since = d.g.mark()
+    d.terminal("counter 8 250 C &")
+    d.g.wait_for(r"@@TERM C 2\s*$", timeout=10, since=since)
+    d.terminal("crash")
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=crash status=142", timeout=10, since=since)
+    d.g.wait_for(r"@@TERM C 8\s*$", timeout=15, since=since)
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=counter status=0", timeout=10, since=since)
+    return "counter kept running through another process's crash and exited 0"
+
+
+def s_stdin_and_shell(d):
+    term_focus(d)
+    since = d.g.mark()
+    d.terminal("upper", r"@@TERM upper: type lines")
+    d.g.type_text("mixed Case 123\n")
+    d.g.wait_for(r"@@TERM MIXED CASE 123\s*$", timeout=10, since=since)
+    d.g.key("ctrl", "d")
+    d.g.wait_for(r"@@TERM upper: 1 lines", timeout=10, since=since)
+    since = d.g.mark()
+    d.terminal("sh", r"@@TERM Aurora user shell")
+    d.g.type_text("hello nested\n")
+    d.g.wait_for(r"@@TERM Hello from user space! pid=\d+ argc=2 \[nested\]", timeout=10, since=since)
+    d.g.wait_for(r"ush: hello exited with status 0", timeout=10, since=since)
+    d.g.type_text("cat /system/welcome.txt\n")
+    d.g.wait_for(r"@@TERM Aurora is a small desktop operating system", timeout=10, since=since)
+    d.g.type_text("exit\n")
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=sh status=0", timeout=10, since=since)
+    # Ctrl+C stops a foreground program
+    since = d.g.mark()
+    d.terminal("spin")
+    d.g.wait_for(r"@@PROC_START pid=\d+ name=spin", timeout=10, since=since)
+    time.sleep(1.0)
+    d.g.key("ctrl", "c")
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=spin status=-1 reason=killed", timeout=10, since=since)
+    return "stdin line + EOF reached the program; user shell spawned/waited; Ctrl+C killed a foreground hog"
+
+
+def s_process_leaks(d):
+    term_focus(d)
+    m0 = d.terminal("mem", r"@@TERM Physical pages free: +(\d+) KiB")
+    before = int(m0.group(1))
+    for i in range(10):
+        since = d.g.mark()
+        d.terminal("hello leakcheck")
+        d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=hello status=0", timeout=10, since=since)
+    m1 = d.terminal("mem", r"@@TERM Physical pages free: +(\d+) KiB")
+    after = int(m1.group(1))
+    if after < before - 64:
+        raise GuestError(f"physical memory leaked across 10 runs: {before} -> {after} KiB free")
+    return f"10 process lifetimes: free physical memory {before} -> {after} KiB"
+
+
 SCENARIOS = [
     ("launch-each-app", s_launch_each_app),
     ("drag-overlap-focus", s_drag_overlap_focus),
@@ -607,6 +738,12 @@ SCENARIOS = [
     ("cursor-edges", s_edges),
     ("menus", s_menus),
     ("open-close-memory", s_open_close_leak),
+    ("user-programs-and-faults", s_user_programs),
+    ("process-memory-isolation", s_memory_isolation),
+    ("preemptive-concurrency", s_concurrency),
+    ("crash-does-not-stop-others", s_crash_does_not_stop_others),
+    ("stdin-shell-ctrl-c", s_stdin_and_shell),
+    ("process-memory-reclaimed", s_process_leaks),
     ("reboot-resets-ramfs", s_reboot),
 ]
 

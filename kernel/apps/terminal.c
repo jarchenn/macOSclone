@@ -9,6 +9,9 @@
 #include "memory/heap.h"
 #include "memory/physical.h"
 #include "drivers/framebuffer.h"
+#include "core/process.h"
+#include "core/sched.h"
+#include "net/net.h"
 #include "lib.h"
 
 #define TERM_LINES 400
@@ -34,6 +37,12 @@ static struct {
     int scroll;
     bool caret;
     bool warned_full;
+    int fg_pid; /* foreground process receiving keyboard input, 0 = none */
+    struct {
+        int pid;
+        size_t n;
+        char buf[TERM_COLS + 1];
+    } partial[8]; /* unterminated output lines per process */
 } T;
 
 static int cols(void)
@@ -122,9 +131,13 @@ static void cmd_help(void)
         "  cd [path] / pwd      change / show the current directory",
         "  open <app|path>      terminal, files, notes, settings, about, or a path",
         "  theme <light|dark>   switch the desktop theme",
-        "  reboot               restart the machine (RAM files are lost)",
+        "  run <prog> [args] [&] start a user program from /system/bin (& = background)",
+        "  <prog> [args]        same as run, for programs in /system/bin",
+        "  ps / kill <pid>      list / stop user processes",
+        "  reboot               restart the machine",
         "Quote arguments with \"...\"; inside quotes \\n is a newline.",
-        "PgUp/PgDn scroll, Up/Down history, Ctrl+C cancels the line.",
+        "PgUp/PgDn scroll, Up/Down history. Ctrl+C cancels the line or stops the",
+        "foreground program; Ctrl+D sends it end-of-input.",
     };
     for (size_t i = 0; i < ARRAY_LEN(lines); i++)
         out_color(C_TEXT, lines[i]);
@@ -344,6 +357,168 @@ static void cmd_theme(int argc, char **argv)
     outf(C_DIM, "theme set to %s", g_theme->dark ? "dark" : "light");
 }
 
+/* ---- Processes -------------------------------------------------------- */
+
+static void flush_partial(int i)
+{
+    if (T.partial[i].n) {
+        push_line(T.partial[i].buf, T.partial[i].n, C_TEXT);
+        T.partial[i].n = 0;
+    }
+}
+
+static int partial_slot(int pid)
+{
+    int free_slot = -1;
+    for (int i = 0; i < 8; i++) {
+        if (T.partial[i].pid == pid)
+            return i;
+        if (T.partial[i].pid == 0 && free_slot < 0)
+            free_slot = i;
+    }
+    if (free_slot < 0) {
+        free_slot = 0;
+        flush_partial(0);
+    }
+    T.partial[free_slot].pid = pid;
+    T.partial[free_slot].n = 0;
+    return free_slot;
+}
+
+/* Console sink: called from system calls of processes this Terminal runs.
+ * `data` is a validated user pointer; it is only read during this call. */
+static void proc_output(void *ctx, int pid, const char *data, size_t len)
+{
+    UNUSED(ctx);
+    int i = partial_slot(pid);
+    size_t c = (size_t)cols();
+    for (size_t k = 0; k < len; k++) {
+        char ch = data[k];
+        if (ch == '\n') {
+            if (T.partial[i].n == 0)
+                push_line("", 0, C_TEXT);
+            else
+                flush_partial(i);
+            continue;
+        }
+        if (ch == '\r')
+            continue;
+        if (ch == '\t')
+            ch = ' ';
+        if ((unsigned char)ch < 32 || (unsigned char)ch > 126)
+            ch = '?';
+        T.partial[i].buf[T.partial[i].n++] = ch;
+        if (T.partial[i].n >= c || T.partial[i].n >= TERM_COLS)
+            flush_partial(i);
+    }
+    T.scroll = 0;
+    wm_invalidate(wm_get(T.win_id));
+}
+
+static void proc_exited(void *ctx, int pid, const char *name, int status, const char *reason)
+{
+    UNUSED(ctx);
+    for (int i = 0; i < 8; i++) {
+        if (T.partial[i].pid == pid) {
+            flush_partial(i);
+            T.partial[i].pid = 0;
+        }
+    }
+    if (reason && reason[0])
+        outf(C_ERROR, "[%s (pid %d) %s]", name, pid, reason);
+    else
+        outf(C_DIM, "[%s (pid %d) exited with status %d]", name, pid, status);
+    if (pid == T.fg_pid)
+        T.fg_pid = 0;
+    wm_invalidate(wm_get(T.win_id));
+}
+
+static const struct proc_console term_console = { proc_output, proc_exited, NULL };
+
+static bool find_program(const char *name, char *path)
+{
+    struct vfs_stat st;
+    if (strchr(name, '/'))
+        return resolve(name, path) == VFS_OK && vfs_stat(path, &st) == VFS_OK && st.type == VFS_FILE;
+    char tmp[VFS_PATH_MAX + 1];
+    k_snprintf(tmp, sizeof tmp, "/system/bin/%s", name);
+    if (vfs_stat(tmp, &st) == VFS_OK && st.type == VFS_FILE) {
+        str_copy(path, tmp, VFS_PATH_MAX + 1);
+        return true;
+    }
+    return false;
+}
+
+static void join_args(int from, int argc, char **argv, char *out, size_t cap);
+
+static void run_program(int argc, char **argv, int first)
+{
+    if (argc <= first) {
+        out_color(C_ERROR, "usage: run <program> [args...] [&]");
+        return;
+    }
+    bool background = argc > first + 1 && !strcmp(argv[argc - 1], "&");
+    if (background)
+        argc--;
+    char path[VFS_PATH_MAX + 1];
+    if (!find_program(argv[first], path)) {
+        outf(C_ERROR, "run: %s: program not found (see ls /system/bin)", argv[first]);
+        return;
+    }
+    char args[AURORA_USER_ARGS_MAX];
+    join_args(first + 1, argc, argv, args, sizeof args);
+    int pid = process_spawn(path, args, &term_console, 0);
+    if (pid < 0) {
+        outf(C_ERROR, "run: %s: %s", argv[first], process_spawn_error(pid));
+        return;
+    }
+    if (background)
+        outf(C_DIM, "[%d] %s started in the background", pid, argv[first]);
+    else
+        T.fg_pid = pid;
+}
+
+static void cmd_ps(void)
+{
+    outf(C_ACCENT, "  PID  STATE    CPU ms  MEM KiB  SYSCALLS  NAME");
+    int n = 0;
+    for (int i = 0; i < MAX_PROCS; i++) {
+        struct process *p = process_at(i);
+        if (!p)
+            continue;
+        uint64_t ms = p->task ? p->task->cpu_ticks * 1000 / PIT_TARGET_HZ : 0;
+        outf(C_TEXT, "%5d  %-7s %7llu  %7llu  %8llu  %s %s", p->pid, p->state == PROC_ZOMBIE ? "zombie" : "running",
+             (unsigned long long)ms, (unsigned long long)(p->user_pages * 4), (unsigned long long)p->syscalls,
+             p->name, p->args);
+        n++;
+    }
+    if (!n)
+        out_color(C_DIM, "  (no user processes)");
+    char tasks[160] = "kernel tasks:";
+    for (int i = 0; i < sched_task_count(); i++) {
+        struct task *t = sched_task_at(i);
+        if (t && !t->proc) {
+            str_append(tasks, " ", sizeof tasks);
+            str_append(tasks, t->name, sizeof tasks);
+        }
+    }
+    out_color(C_DIM, tasks);
+    outf(C_DIM, "context switches: %llu", (unsigned long long)sched_context_switches());
+}
+
+static void cmd_kill(int argc, char **argv)
+{
+    if (argc < 2) {
+        out_color(C_ERROR, "usage: kill <pid>");
+        return;
+    }
+    int pid = 0;
+    for (const char *q = argv[1]; *q >= '0' && *q <= '9'; q++)
+        pid = pid * 10 + (*q - '0');
+    if (process_kill(pid))
+        outf(C_ERROR, "kill: %s: no such process", argv[1]);
+}
+
 static void execute(const char *line)
 {
     struct cmdline cl;
@@ -403,8 +578,16 @@ static void execute(const char *line)
         out_color(C_DIM, "restarting...");
         desktop_request_reboot();
     }
-    else
-        outf(C_ERROR, "%s: command not found (try 'help')", c);
+    else if (!strcmp(c, "run")) run_program(cl.argc, cl.argv, 1);
+    else if (!strcmp(c, "ps")) cmd_ps();
+    else if (!strcmp(c, "kill")) cmd_kill(cl.argc, cl.argv);
+    else {
+        char path[VFS_PATH_MAX + 1];
+        if (find_program(c, path))
+            run_program(cl.argc, cl.argv, 0);
+        else
+            outf(C_ERROR, "%s: command not found (try 'help')", c);
+    }
 }
 
 /* ---- Window callbacks ----------------------------------------------------- */
@@ -429,7 +612,14 @@ static void render(struct window *w, struct surface *s)
     int c = cols();
     /* The prompt line(s) occupy the bottom of the history view. */
     char prompt[VFS_PATH_MAX + 16];
-    k_snprintf(prompt, sizeof prompt, "aurora:%s$ ", T.cwd);
+    if (T.fg_pid && process_get(T.fg_pid)) {
+        /* A foreground program owns the input line; show its prompt. */
+        prompt[0] = '\0';
+        for (int i = 0; i < 8; i++)
+            if (T.partial[i].pid == T.fg_pid && T.partial[i].n)
+                k_snprintf(prompt, sizeof prompt, "%.*s", (int)MIN(T.partial[i].n, sizeof prompt - 1), T.partial[i].buf);
+    } else
+        k_snprintf(prompt, sizeof prompt, "aurora:%s$ ", T.cwd);
     size_t plen = strlen(prompt);
     size_t total = plen + T.in_len;
     int prompt_rows = (int)(total / (size_t)c) + 1;
@@ -508,9 +698,54 @@ static void history_recall(int dir)
     T.in_len = T.in_cur = strlen(T.input);
 }
 
+static bool fg_key(struct window *w, const struct key_event *e)
+{
+    if (!T.fg_pid)
+        return false;
+    if (!process_get(T.fg_pid)) {
+        T.fg_pid = 0;
+        return false;
+    }
+    if ((e->mods & MOD_CTRL) && e->key == KEY_CHAR && (e->ascii | 0x20) == 'c') {
+        out_color(C_DIM, "^C");
+        process_kill(T.fg_pid);
+        wm_invalidate(w);
+        return true;
+    }
+    if ((e->mods & MOD_CTRL) && e->key == KEY_CHAR && (e->ascii | 0x20) == 'd') {
+        process_input(T.fg_pid, "", 0, true);
+        return true;
+    }
+    if (e->key == KEY_ENTER) {
+        char line[CMD_LINE_MAX + 2];
+        /* Echo the program's pending prompt and the typed text as one line. */
+        int slot = -1;
+        for (int i = 0; i < 8; i++)
+            if (T.partial[i].pid == T.fg_pid && T.partial[i].n)
+                slot = i;
+        if (slot >= 0) {
+            char echo[TERM_COLS + CMD_LINE_MAX + 2];
+            k_snprintf(echo, sizeof echo, "%.*s%s", (int)T.partial[slot].n, T.partial[slot].buf, T.input);
+            T.partial[slot].n = 0;
+            out_color(C_TEXT, echo);
+        } else {
+            out_color(C_TEXT, T.input);
+        }
+        k_snprintf(line, sizeof line, "%s\n", T.input);
+        process_input(T.fg_pid, line, strlen(line), false);
+        T.in_len = T.in_cur = 0;
+        T.input[0] = '\0';
+        wm_invalidate(w);
+        return true;
+    }
+    return false; /* ordinary line editing keys fall through */
+}
+
 static void key(struct window *w, const struct key_event *e)
 {
     T.caret = true;
+    if (fg_key(w, e))
+        return;
     if ((e->mods & MOD_CTRL) && e->key == KEY_CHAR) {
         if (e->ascii == 'l' || e->ascii == 'L') {
             T.count = T.head = 0;

@@ -11,6 +11,7 @@
 #include "arch/cpu.h"
 #include "arch/x86_64/io.h"
 #include "core/log.h"
+#include "core/sched.h"
 
 #define DATA 0x60
 #define STATUS 0x64
@@ -111,6 +112,7 @@ static void kbd_irq(void)
         uint8_t b = inb(DATA);
         byte_ring_push((st & ST_AUX) ? &mouse_ring : &kbd_ring, b);
     }
+    sched_wake(sched_desktop()); /* input is handled by the desktop task */
 }
 
 static void mouse_irq(void) { kbd_irq(); /* same routing logic */ }

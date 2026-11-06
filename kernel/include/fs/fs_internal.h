@@ -16,6 +16,12 @@ struct fs_backend {
     int (*truncate)(struct vfs_node *node, uint32_t size);
     /* Replace the whole content atomically. */
     int (*replace)(struct vfs_node *node, const void *buf, uint32_t n);
+    /* Optional: called before a node is unlinked (frees backend storage). */
+    int (*remove)(struct vfs_node *node);
+    /* Optional: metadata changed (rename) - persistent backends record it. */
+    void (*changed)(struct vfs_node *node);
+    /* Optional: make all changes durable. */
+    int (*sync)(void);
 };
 
 struct vfs_node {

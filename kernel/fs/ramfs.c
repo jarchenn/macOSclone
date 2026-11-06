@@ -119,6 +119,14 @@ static int ram_replace(struct vfs_node *n, const void *buf, uint32_t len)
     return VFS_OK;
 }
 
+static int ram_remove(struct vfs_node *n)
+{
+    bytes_used -= n->capacity;
+    if (nodes_used)
+        nodes_used--;
+    return VFS_OK;
+}
+
 const struct fs_backend ramfs_backend = {
     .name = "ramfs",
     .readonly = false,
@@ -126,6 +134,7 @@ const struct fs_backend ramfs_backend = {
     .write = ram_write,
     .truncate = ram_truncate,
     .replace = ram_replace,
+    .remove = ram_remove,
 };
 
 static int ro_create(struct vfs_node *p, const char *name, uint8_t type, struct vfs_node **out)

@@ -51,6 +51,20 @@ KERNEL_CFLAGS = [
     "-Werror=incompatible-pointer-types", "-Werror=int-conversion",
 ]
 
+USER_CFLAGS = [
+    "--target=x86_64-unknown-none-elf",
+    "-std=c11", "-ffreestanding", "-nostdlibinc", "-fno-builtin-printf",
+    "-fno-stack-protector", "-fno-stack-check", "-fno-pic", "-fno-pie",
+    "-mgeneral-regs-only", "-mno-mmx", "-mno-sse", "-mno-sse2", "-mno-80387",
+    "-fno-omit-frame-pointer", "-fno-strict-aliasing", "-fwrapv", "-O2", "-g",
+    "-Wall", "-Wextra", "-Wno-unused-parameter",
+]
+# The user runtime reuses the kernel's freestanding string/format code.
+USER_LIB_SOURCES = [
+    "user/lib/crt0.S", "user/lib/libc.c",
+    "kernel/lib/format.c", "kernel/lib/string.c", "kernel/lib/memory.c", "kernel/lib/crc32.c",
+]
+
 # Kernel modules that are hardware independent and compiled into host tests.
 HOST_TEST_SOURCES = [
     "kernel/lib/format.c",
@@ -68,6 +82,8 @@ HOST_TEST_SOURCES = [
     "kernel/apps/textbuf.c",
     "kernel/memory/heap.c",
     "kernel/memory/physical.c",
+    "kernel/core/elf.c",
+    "kernel/fs/pfs.c",
 ]
 
 
@@ -168,9 +184,50 @@ def build_kernel(variant: str) -> Path:
     return elf
 
 
-def build_initramfs(variant: str) -> Path:
+def compile_obj(cc, flags, src: Path, objdir: Path, force: bool) -> Path:
+    name = rel(src).replace("\\", "/").replace("/", "_")
+    obj = objdir / (name + ".o")
+    dep = objdir / (name + ".d")
+    if force or needs_rebuild(obj, dep, src):
+        obj.parent.mkdir(parents=True, exist_ok=True)
+        print(f"  UCC {rel(src)}")
+        run([cc] + flags + ["-MMD", "-MF", str(dep), "-c", str(src), "-o", str(obj)])
+    return obj
+
+
+def build_user(variant: str) -> dict:
+    """Builds every user/bin/*.c program; returns {name: elf_path}."""
+    cc = env.require("clang", env.clang())
+    ld = env.require("ld.lld", env.lld())
+    udir = BUILD / variant / "user"
+    objdir = udir / "obj"
+    flags = USER_CFLAGS + ["-I" + str(ROOT / "user/include"), "-I" + str(ROOT / "kernel/include"),
+                           f'-DAURORA_VERSION="{VERSION}"']
+    stamp = udir / "flags.txt"
+    flagline = " ".join(flags)
+    force = not stamp.exists() or stamp.read_text() != flagline
+    udir.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(flagline)
+    lib_objs = [compile_obj(cc, flags, ROOT / s, objdir, force) for s in USER_LIB_SOURCES]
+    script = ROOT / "user/linker.ld"
+    out = {}
+    for src in sorted((ROOT / "user/bin").glob("*.c")):
+        obj = compile_obj(cc, flags, src, objdir, force)
+        elf = udir / src.stem
+        objs = lib_objs + [obj]
+        if (not elf.exists() or any(o.stat().st_mtime > elf.stat().st_mtime for o in objs)
+                or script.stat().st_mtime > elf.stat().st_mtime):
+            print(f"  ULD {rel(elf)}")
+            run([ld, "-nostdlib", "-static", "-z", "max-page-size=0x1000", "-z", "noexecstack",
+                 "--build-id=none", "--no-undefined", "-T", str(script), "-o", str(elf)] + [str(o) for o in objs])
+        out[src.stem] = elf
+    return out
+
+
+def build_initramfs(variant: str, programs: dict) -> Path:
     out = BUILD / variant / "initramfs.img"
-    data = make_initramfs.pack(ROOT / "initramfs")
+    extra = {f"system/bin/{name}": path.read_bytes() for name, path in programs.items()}
+    data = make_initramfs.pack(ROOT / "initramfs", extra)
     if not out.exists() or out.read_bytes() != data:
         print(f"  FS  {rel(out)}")
         out.write_bytes(data)
@@ -224,7 +281,8 @@ def cmd_build(args):
     for v in (args.variant if isinstance(args.variant, list) else [args.variant]):
         print(f"[{v}]")
         elf = build_kernel(v)
-        initrd = build_initramfs(v)
+        programs = build_user(v)
+        initrd = build_initramfs(v, programs)
         img = build_image(v, elf, initrd)
         if v == "release":
             shutil.copyfile(img, BUILD / "aurora.img")

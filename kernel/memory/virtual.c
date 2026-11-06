@@ -146,6 +146,13 @@ void vmm_init(void)
         }
     }
 
+    /* Pre-create every upper-half PML4 entry. Process address spaces copy
+     * these 256 entries, so all later kernel mappings (heap growth, task
+     * stacks) land in tables shared by every address space. */
+    for (unsigned i = 256; i < 512; i++)
+        if (!paging_ensure_pml4_entry(kernel_pml4, i))
+            panic("vmm: cannot allocate kernel PDPT %u", i);
+
     write_cr3(kernel_pml4_phys);
     g_vmm.table_pages = paging_table_pages;
     klog("vmm: CR3=%llx kernel=%llu pages, hhdm=%llu x 2M + %llu x 4K, fb=%llu pages (%s), NX=%s",
@@ -153,4 +160,58 @@ void vmm_init(void)
          (unsigned long long)g_vmm.hhdm_pages_2m, (unsigned long long)g_vmm.hhdm_pages_4k,
          (unsigned long long)g_vmm.fb_pages, g_vmm.fb_write_combining ? "write-combining" : "uncached",
          g_vmm.nx ? "on" : "unavailable");
+}
+
+phys_addr_t vmm_kernel_space(void) { return kernel_pml4_phys; }
+
+uint64_t *vmm_space_create(phys_addr_t *phys_out)
+{
+    phys_addr_t p = pmm_alloc_page();
+    if (!p)
+        return NULL;
+    uint64_t *pml4 = phys_to_virt(p);
+    for (unsigned i = 256; i < 512; i++)
+        pml4[i] = kernel_pml4[i];
+    *phys_out = p;
+    return pml4;
+}
+
+uint64_t vmm_space_destroy(uint64_t *pml4, phys_addr_t phys)
+{
+    if (phys == kernel_pml4_phys || read_cr3() == phys)
+        panic("vmm: refusing to destroy the active or kernel address space");
+    uint64_t pages = paging_free_user_half(pml4);
+    pmm_free_page(phys);
+    return pages;
+}
+
+bool vmm_map_user(uint64_t *pml4, uint64_t va, phys_addr_t pa, bool writable, bool executable)
+{
+    uint64_t f = PTE_U | (writable ? PTE_W : 0) | (executable ? 0 : PTE_NX);
+    return paging_map_4k(pml4, va, pa, f);
+}
+
+uint64_t vmm_user_pte(uint64_t *pml4, uint64_t va) { return paging_get_pte(pml4, va); }
+
+/* Kernel task stacks: slots in the stack region above the boot stack, each
+ * an unmapped guard page followed by KSTACK_SIZE bytes. */
+#define KSTACK_REGION (VMM_STACK_BASE + 0x100000ull)
+#define KSTACK_SLOT (KSTACK_SIZE + 2 * PAGE_SIZE)
+
+uint64_t vmm_kstack_alloc(int slot)
+{
+    uint64_t bottom = KSTACK_REGION + (uint64_t)slot * KSTACK_SLOT + PAGE_SIZE;
+    if (!vmm_map_fresh(bottom, KSTACK_SIZE))
+        return 0;
+    return bottom + KSTACK_SIZE;
+}
+
+void vmm_kstack_free(int slot)
+{
+    uint64_t bottom = KSTACK_REGION + (uint64_t)slot * KSTACK_SLOT + PAGE_SIZE;
+    for (uint64_t va = bottom; va < bottom + KSTACK_SIZE; va += PAGE_SIZE) {
+        uint64_t pa = paging_unmap_4k(kernel_pml4, va);
+        if (pa)
+            pmm_free_page(pa);
+    }
 }

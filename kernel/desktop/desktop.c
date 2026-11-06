@@ -10,6 +10,7 @@
 #include "core/time.h"
 #include "arch/x86_64/io.h"
 #include "memory/heap.h"
+#include "core/sched.h"
 #include "lib.h"
 
 static struct surface wallpaper;
@@ -718,12 +719,15 @@ void desktop_main(void)
         if (reboot_requested)
             do_reboot();
 
-        /* Race-free idle: interrupts are disabled while checking for work, and
-         * `sti; hlt` re-enables them atomically with the halt. */
+        /* Race-free idle: interrupts are disabled while checking for work;
+         * the desktop task then blocks until an input IRQ, a process write or
+         * the next periodic tick wakes it. Other tasks run meanwhile. */
         cpu_cli();
-        if (!work_pending())
-            cpu_sti_hlt();
-        else
-            cpu_sti();
+        if (!work_pending()) {
+            uint64_t t = time_ms();
+            uint64_t next = last_tick + 250 > t ? last_tick + 250 - t : 1;
+            sched_block(next);
+        }
+        cpu_sti();
     }
 }

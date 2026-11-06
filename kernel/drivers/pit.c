@@ -2,11 +2,16 @@
 #include "arch/cpu.h"
 #include "arch/x86_64/io.h"
 #include "drivers/pic.h"
+#include "core/sched.h"
 
 static uint64_t ticks; /* written only by IRQ0; 64-bit aligned loads are atomic */
 static uint32_t divisor;
 
-static void pit_irq(void) { __atomic_store_n(&ticks, ticks + 1, __ATOMIC_RELEASE); }
+static void pit_irq(void)
+{
+    __atomic_store_n(&ticks, ticks + 1, __ATOMIC_RELEASE);
+    sched_tick();
+}
 
 void pit_init(void)
 {

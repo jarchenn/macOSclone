@@ -34,6 +34,8 @@ enum vfs_err {
     VFS_ENOMEM = -11,
     VFS_EFBIG = -12,
     VFS_EBADARCHIVE = -13,
+    VFS_EBUSY = -14,
+    VFS_ENOTEMPTY = -15,
 };
 
 #define VFS_O_READ 1u
@@ -80,6 +82,12 @@ int vfs_seek(int fd, uint32_t offset);
 int vfs_mkdir(const char *path);
 int vfs_create(const char *path);            /* empty file; EEXIST if present */
 int vfs_truncate(const char *path, uint32_t size);
+/* Removes a file or an empty directory (EBUSY if a file is open). */
+int vfs_remove(const char *path);
+/* Renames/moves within one filesystem (same backend). */
+int vfs_rename(const char *from, const char *to);
+/* Flushes persistent storage; returns 0 when everything is durable. */
+int vfs_sync(void);
 /* index-th entry (sorted by name) of a directory; ENOENT past the end. */
 int vfs_readdir(const char *path, uint32_t index, struct vfs_dirent *out);
 /* Whole-file helpers. vfs_write_file replaces content atomically: on any

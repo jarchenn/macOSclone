@@ -35,6 +35,8 @@ const char *vfs_strerror(int err)
     case VFS_ENOMEM: return "out of memory";
     case VFS_EFBIG: return "file too large (64 KiB limit)";
     case VFS_EBADARCHIVE: return "corrupt initramfs archive";
+    case VFS_EBUSY: return "file is in use";
+    case VFS_ENOTEMPTY: return "directory not empty";
     default: return "unknown error";
     }
 }
@@ -302,6 +304,94 @@ int vfs_truncate(const char *path, uint32_t size)
     if (r == VFS_OK)
         generation++;
     return r;
+}
+
+static void detach(struct vfs_node *n)
+{
+    struct vfs_node **pp = &n->parent->children;
+    while (*pp && *pp != n)
+        pp = &(*pp)->next;
+    if (*pp)
+        *pp = n->next;
+    n->next = NULL;
+    n->parent = NULL;
+}
+
+static bool node_open(const struct vfs_node *n)
+{
+    for (int i = 0; i < VFS_MAX_OPEN; i++)
+        if (files[i].used && files[i].node == n)
+            return true;
+    return false;
+}
+
+int vfs_remove(const char *path)
+{
+    struct vfs_node *n;
+    int r = resolve(path, &n, NULL);
+    if (r)
+        return r;
+    if (n == root || n == home || !n->parent)
+        return VFS_EINVAL; /* mount points cannot be removed */
+    if (n->fs->readonly)
+        return VFS_EROFS;
+    if (n->type == VFS_DIR && n->children)
+        return VFS_ENOTEMPTY;
+    if (node_open(n))
+        return VFS_EBUSY;
+    r = n->fs->remove ? n->fs->remove(n) : VFS_EROFS;
+    if (r)
+        return r;
+    detach(n);
+    if (n->capacity && n->data)
+        kfree(n->data);
+    kfree(n);
+    generation++;
+    return VFS_OK;
+}
+
+int vfs_rename(const char *from, const char *to)
+{
+    char nto[VFS_PATH_MAX + 1], parent[VFS_PATH_MAX + 1], name[VFS_NAME_MAX + 1];
+    struct vfs_node *n, *dir, *existing;
+    int r = resolve(from, &n, NULL);
+    if (r)
+        return r;
+    if (n == root || n == home || !n->parent)
+        return VFS_EINVAL;
+    if (n->fs->readonly)
+        return VFS_EROFS;
+    r = vfs_normalize("/", to, nto, sizeof nto);
+    if (r)
+        return r;
+    if (lookup(nto, &existing) == VFS_OK)
+        return existing == n ? VFS_OK : VFS_EEXIST;
+    r = vfs_split(nto, parent, sizeof parent, name, sizeof name);
+    if (r)
+        return r;
+    r = lookup(parent, &dir);
+    if (r)
+        return r;
+    if (dir->type != VFS_DIR)
+        return VFS_ENOTDIR;
+    if (dir->fs != n->fs)
+        return VFS_EROFS; /* cross-filesystem moves are not supported */
+    /* A directory cannot be moved inside itself. */
+    for (struct vfs_node *a = dir; a; a = a->parent)
+        if (a == n)
+            return VFS_EINVAL;
+    detach(n);
+    str_copy(n->name, name, sizeof n->name);
+    vfs_node_attach(dir, n);
+    if (n->fs->changed)
+        n->fs->changed(n);
+    generation++;
+    return VFS_OK;
+}
+
+int vfs_sync(void)
+{
+    return home && home->fs->sync ? home->fs->sync() : VFS_OK;
 }
 
 int vfs_read_file(const char *path, void *buf, size_t cap, size_t *len)

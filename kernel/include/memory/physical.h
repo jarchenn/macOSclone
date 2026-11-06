@@ -36,6 +36,7 @@ bool pmm_core_is_used(const struct pmm *p, phys_addr_t addr);
 #ifndef AURORA_HOST
 void pmm_init(void);
 phys_addr_t pmm_alloc_page(void);        /* zeroed page, 0 on OOM */
+phys_addr_t pmm_alloc_contig(size_t pages); /* zeroed, physically contiguous */
 void pmm_free_page(phys_addr_t addr);
 void pmm_reclaim_bootloader(void);
 const struct pmm *pmm_state(void);

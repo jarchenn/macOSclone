@@ -14,7 +14,12 @@ struct interrupt_frame {
 
 #define GDT_KERNEL_CODE 0x08
 #define GDT_KERNEL_DATA 0x10
-#define GDT_TSS 0x18
+#define GDT_USER_DATA 0x18
+#define GDT_USER_CODE 0x20
+#define GDT_TSS 0x28
+#define USER_CS (GDT_USER_CODE | 3)
+#define USER_SS (GDT_USER_DATA | 3)
+#define SYSCALL_VECTOR 0x80
 
 #define IRQ_BASE 0x20
 #define IRQ_TIMER 0
@@ -25,6 +30,7 @@ struct interrupt_frame {
 typedef void (*irq_handler_t)(void);
 
 void gdt_init(void);
+void gdt_set_kernel_stack(uint64_t rsp0);
 void idt_init(void);
 void irq_install(unsigned irq, irq_handler_t h);
 uint64_t interrupt_spurious_count(void);
