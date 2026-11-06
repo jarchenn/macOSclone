@@ -9,8 +9,9 @@ endif
 
 B := $(PYTHON) tools/build.py
 MEM ?= 256M
+SMP ?= 1
 
-.PHONY: all help deps run run-bios debug test smoke integration storage network soak check clean dist
+.PHONY: all help deps run run-bios debug test smoke integration storage network smp stress soak check clean dist
 
 all:
 	$(B) build --variant release
@@ -22,7 +23,7 @@ deps:
 	$(PYTHON) tools/fetch_deps.py
 
 run:
-	$(B) run --memory $(MEM)
+	$(B) run --memory $(MEM) --smp $(SMP)
 
 run-bios:
 	$(B) run --memory $(MEM) --bios
@@ -48,6 +49,14 @@ storage:
 network:
 	$(B) build --variant test
 	$(PYTHON) tools/network_test.py
+
+smp:
+	$(B) build --variant test
+	$(PYTHON) tools/smp_test.py
+
+stress:
+	$(B) build --variant test
+	$(PYTHON) tools/smp_test.py --only stress --stress-seconds 1800
 
 soak:
 	$(B) build --variant test

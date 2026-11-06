@@ -2,6 +2,9 @@
 #include "desktop/desktop.h"
 #include "apps/cmdline.h"
 #include "apps/textbuf.h"
+#include "arch/percpu.h"
+#include "core/spinlock.h"
+#include "core/smptest.h"
 #include "apps/app_util.h"
 #include "fs/vfs.h"
 #include "core/log.h"
@@ -123,6 +126,7 @@ static void cmd_help(void)
         "  uname [-a]           system identity",
         "  uptime               time since boot (PIT timer)",
         "  mem                  memory statistics",
+        "  cpus                 per-CPU scheduler and interrupt counters",
         "  ls [path]            list a directory",
         "  cat <path>           print a file",
         "  echo <text>          print text",
@@ -167,6 +171,29 @@ static void cmd_uptime(void)
     outf(C_TEXT, "up %u:%02u:%02u  (%llu ms, %llu PIT ticks, divisor %u)", (unsigned)(s / 3600),
          (unsigned)(s / 60 % 60), (unsigned)(s % 60), (unsigned long long)ms,
          (unsigned long long)time_ticks(), pit_divisor());
+}
+
+static void cmd_cpus(void)
+{
+    outf(C_ACCENT, "CPU APIC     TICKS  USER%%  IDLE%%  KERN%%  SWITCHES   IPIS  TLB-IN");
+    for (uint32_t i = 0; i < g_ncpus; i++) {
+        const struct cpu *c = &g_cpus[i];
+        uint64_t t = c->ticks ? c->ticks : 1;
+        outf(c->online ? C_TEXT : C_DIM, "%3u %4u %9llu  %4llu   %4llu   %4llu  %8llu %6llu  %6llu%s", c->index, c->apic_id,
+             (unsigned long long)c->ticks, (unsigned long long)(c->user_ticks * 100 / t),
+             (unsigned long long)(c->idle_ticks * 100 / t), (unsigned long long)(c->kernel_ticks * 100 / t),
+             (unsigned long long)c->switches, (unsigned long long)c->ipis, (unsigned long long)c->tlb_shootdowns,
+             c->online ? "" : "  (offline)");
+        TEST_EVENT("CPU idx=%u apic=%u online=%d ticks=%llu user=%llu idle=%llu switches=%llu tlb=%llu", c->index,
+                   c->apic_id, c->online ? 1 : 0, (unsigned long long)c->ticks, (unsigned long long)c->user_ticks,
+                   (unsigned long long)c->idle_ticks, (unsigned long long)c->switches,
+                   (unsigned long long)c->tlb_shootdowns);
+    }
+    outf(C_DIM, "%u CPU(s) online; BKL contended %llu times; lockdep %u classes, %u violation(s), %u long hold(s)",
+         g_ncpus_online, (unsigned long long)bkl_contended(), lockdep_classes(), lockdep_violations(),
+         lockdep_long_holds());
+    TEST_EVENT("CPUS online=%u lockdep_violations=%u long_holds=%u", g_ncpus_online, lockdep_violations(),
+               lockdep_long_holds());
 }
 
 static void cmd_mem(void)
@@ -556,6 +583,7 @@ static void execute(const char *line)
     }
     else if (!strcmp(c, "uptime")) cmd_uptime();
     else if (!strcmp(c, "mem")) cmd_mem();
+    else if (!strcmp(c, "cpus")) cmd_cpus();
     else if (!strcmp(c, "ls")) cmd_ls(cl.argc, cl.argv);
     else if (!strcmp(c, "cat")) cmd_cat(cl.argc, cl.argv);
     else if (!strcmp(c, "echo")) {
@@ -571,6 +599,22 @@ static void execute(const char *line)
     else if (!strcmp(c, "open")) cmd_open(cl.argc, cl.argv);
     else if (!strcmp(c, "theme")) cmd_theme(cl.argc, cl.argv);
 #ifdef AURORA_TEST
+    /* Test-build only: TLB shootdown test ("tlbtest noflush" = control run
+     * without a shootdown, which may show a stale translation). */
+    else if (!strcmp(c, "tlbtest")) {
+        bool flush = !(cl.argc == 2 && !strcmp(cl.argv[1], "noflush"));
+        struct tlb_test_result tr;
+        int tres = smp_tlb_test(flush, &tr);
+        if (tres)
+            outf(C_ERROR, "tlbtest: could not run (%d)", tres);
+        else
+            outf(C_TEXT, "tlbtest: %s; cpu %d unmapped, cpu %d read before=%s after=%s", flush ? "shootdown" : "no shootdown",
+                 tr.unmap_cpu, tr.reader_cpu, tr.first_read_ok ? "ok" : "BAD",
+                 tr.second_read_faulted ? "fault" : (tr.second_value_stale ? "stale value" : "other"));
+        TEST_EVENT("TLBTEST flush=%d r=%d unmap_cpu=%d reader_cpu=%d before=%d faulted=%d stale=%d", flush ? 1 : 0, tres,
+                   tr.unmap_cpu, tr.reader_cpu, tr.first_read_ok ? 1 : 0, tr.second_read_faulted ? 1 : 0,
+                   tr.second_value_stale ? 1 : 0);
+    }
     /* Test-build only: rewrite /home/stress/f0..f7 for N rounds; every file
      * carries its own CRC so a later check can detect torn or mixed data. */
     else if (!strcmp(c, "pfsstress") && cl.argc == 2) {

@@ -2,14 +2,18 @@
 #define AURORA_SCHED_H
 #include "types.h"
 
-/* Tasks and the scheduler (single CPU).
+/* Tasks and the scheduler (SMP).
+ *
+ * One global task table protected by sched_lock; each CPU has its own current
+ * task, idle task and time slice (struct cpu). sched_lock is held across a
+ * context switch and released by the task that is switched to, so a task's
+ * saved state is complete before another CPU can pick it.
  *
  * Preemption model: the timer preempts code running in **user mode** and the
- * idle task. Kernel code (the desktop task, network task, terminal jobs and
- * every system call) is never preempted; it gives up the CPU only at explicit
- * blocking points (sched_block, sched_sleep_ms, sched_yield). Kernel data
- * structures therefore need no locks beyond disabling interrupts around state
- * that IRQ handlers also touch. */
+ * idle task. Kernel code is never preempted; it gives up the CPU only at
+ * explicit blocking points. Kernel code that predates SMP runs under the big
+ * kernel lock (core/spinlock.h), which the scheduler drops while a task is
+ * switched out. */
 
 #define MAX_TASKS 64
 #define SCHED_SLICE_TICKS 3 /* 12 ms at 250 Hz */
@@ -34,12 +38,24 @@ struct task {
     void *arg;
     uint64_t cpu_ticks;  /* ticks spent running (accounting) */
     uint64_t switches;
+    int on_cpu;          /* CPU index running it, -1 if not running */
+    int last_cpu;
+    bool wake_pending;   /* woken while not blocked: next block returns at once */
+    int bkl_depth;       /* big kernel lock recursion depth */
+    uint32_t cpu_mask_seen; /* CPUs this task has run on (statistics) */
+    int pin_cpu;         /* run only on this CPU (-1 = any) */
+    bool no_bkl;         /* kernel task that never takes the BKL (tests) */
 };
 
 void sched_init(void);   /* turns the boot context into task 0 ("desktop") */
+void sched_init_ap(void); /* creates this AP's idle task and enters it */
+NORETURN void sched_ap_idle(void);
+void sched_resched_ipi(void); /* IPI_RESCHED_VECTOR handler */
 struct task *sched_current(void);
 struct task *sched_desktop(void);
 struct task *task_create(const char *name, void (*entry)(void *), void *arg, struct process *proc);
+/* Kernel task bound to one CPU that runs without the BKL (diagnostics). */
+struct task *task_create_pinned(const char *name, void (*entry)(void *), void *arg, int cpu);
 NORETURN void task_exit(void);
 void schedule(void);
 void sched_yield(void);

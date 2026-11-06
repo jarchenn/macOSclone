@@ -57,7 +57,7 @@ def char_keys(ch: str):
 
 class Guest:
     def __init__(self, image, memory="256M", firmware="uefi", name="guest", no_reboot=True, keep_dir=None,
-                 data_disk=None, network=None):
+                 data_disk=None, network=None, smp=None):
         self.image = Path(image)
         self.memory = memory
         self.firmware = firmware
@@ -72,6 +72,8 @@ class Guest:
         self.cursor = None  # last cursor position reported by the guest (test builds)
         self.data_disk = data_disk  # path to a raw image, kept across start/stop
         self.network = network
+        # AURORA_TEST_SMP runs every suite with that many virtual CPUs.
+        self.smp = smp if smp is not None else int(os.environ.get("AURORA_TEST_SMP", "1"))
 
     # ---- lifecycle -------------------------------------------------------
     def start(self):
@@ -87,7 +89,7 @@ class Guest:
         cmd = env.qemu_command(img, vars_copy, memory=self.memory, firmware=self.firmware,
                                serial=f"file:{self.serial_path}", qmp=f"tcp:127.0.0.1:{port},server=on,wait=off",
                                display="none", no_reboot=self.no_reboot,
-                               data_disk=self.data_disk, network=self.network)
+                               data_disk=self.data_disk, network=self.network, smp=self.smp)
         self.cmdline = cmd
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=self.tmp)
         deadline = time.time() + 20
@@ -184,6 +186,9 @@ class Guest:
                 return m
             if fail_on_panic and "AURORA_PANIC" in text[start:]:
                 raise GuestError("guest panicked:\n" + text[text.find("AURORA_PANIC", start) - 20:][:3000])
+            if fail_on_panic and "LOCKDEP:" in text:
+                # the lock validator (test build) found an ordering bug
+                raise GuestError("lock validator report:\n" + text[text.find("LOCKDEP:") - 20:][:1500])
             if not self.alive():
                 raise GuestError(f"QEMU exited while waiting for {pattern!r}\n--- serial tail ---\n{text[-3000:]}")
             if time.time() > deadline:

@@ -103,12 +103,12 @@ def ovmf():
 
 def qemu_command(image, vars_copy, memory="256M", firmware="uefi", serial=None,
                  qmp=None, display=None, extra=None, no_reboot=True, gdb=False,
-                 data_disk=None, network=None):
+                 data_disk=None, network=None, smp=1):
     """Build the reference QEMU command line as a list of arguments."""
     cmd = [require("qemu-system-x86_64", qemu()),
            "-machine", "pc",
            "-cpu", "qemu64,+nx",
-           "-smp", "1",
+           "-smp", str(smp),
            "-m", memory,
            "-vga", "std",
            "-drive", f"file={image},format=raw,if=ide,index=0,media=disk"]

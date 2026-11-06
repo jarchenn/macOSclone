@@ -56,10 +56,11 @@ x2APIC mode it writes MSR 0x835 instead. The boot fails loudly
 ## Kernel bring-up order
 
 serial → validate/copy boot info → framebuffer + diagnostic console → CPUID →
-own GDT (code 0x08, data 0x10, TSS 0x18 with IST stacks) → IDT → physical
+own per-CPU GDT (kernel 0x08/0x10, user 0x18/0x20, TSS 0x28 with IST stacks; GS = per-CPU data) → IDT → physical
 allocator → own page tables + CR3 switch → switch to the guarded kernel stack →
 reclaim bootloader memory → heap → self-tests → PIC remap + LAPIC virtual wire
-→ PIT → PS/2 → `sti` → timer check → VFS → `AURORA_BOOT_OK` → desktop.
+→ PIT → PS/2 → `sti` → timer check → ACPI → LAPIC/IOAPIC → LAPIC timer →
+APs → SCI → VFS → PCI/virtio → network → `AURORA_BOOT_OK` → desktop.
 
 Each stage prints an `AURORA_MILESTONE <name>` line on COM1 after it actually
 completed; the smoke test checks they appear, in order.

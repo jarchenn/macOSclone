@@ -102,3 +102,11 @@ void lapic_virtual_wire(void *mmio)
     *lint0 = LVT_EXTINT; /* unmasked, ExtINT delivery, edge */
     klog("pic: LAPIC LINT0 set to ExtINT (virtual wire), was masked by bootloader");
 }
+
+uint16_t pic_enabled_mask(void) { return (uint16_t)~mask; }
+
+void pic_mask_all(void)
+{
+    mask = 0xFFFF;
+    write_masks();
+}

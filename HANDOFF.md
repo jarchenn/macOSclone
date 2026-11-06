@@ -2,10 +2,11 @@
 
 ## State
 
-Releases 0.1–0.4 are implemented, plus these roadmap "Later" items: window
+Releases 0.1–0.5 are implemented, plus these roadmap "Later" items: window
 resizing, delete and rename, a text clipboard, the Caps Lock LED and ACPI
-power-off. `STATUS.md` has the evidence for each. Work since 0.1 is on branch
-`roadmap-0.2-0.4`. `main` (pushed to `origin`, github.com/jarchenn/macOSclone)
+power-off. 0.5 is SMP and ACPI, the first release of the user's "OS Roadmap:
+0.5 and Beyond". `STATUS.md` has the evidence for each, including the 0.5
+items that are not done. Work since 0.1 is on branch `roadmap-0.2-0.4`. `main` (pushed to `origin`, github.com/jarchenn/macOSclone)
 holds 0.1. `build/` and `third_party/` are ignored; `make` re-downloads and
 verifies Limine.
 
@@ -13,14 +14,17 @@ verifies Limine.
 
 ```bash
 make                     # release image -> build/aurora.img
-make test                # host unit tests (9 suites)
+make test                # host unit tests (10 suites)
 make check               # ELF/image checks
 make smoke               # boots: UEFI 128/256/512 MiB, BIOS 256 MiB, panic diagnostic
 make integration         # 23 QMP-driven guest scenarios (test build)
 make storage             # data-disk persistence + crash consistency (5 scenarios)
 make network             # networking against host-side servers (9 checks)
+make smp                 # SMP/ACPI: boot at 1/2/4/8 CPUs, TLB, power button, 2-min stress
+make stress              # 30-minute -smp 8 stress (0.5 acceptance)
+AURORA_TEST_SMP=4 make integration   # any guest suite at 4 CPUs
 make soak                # 240 s random input + idle
-make dist                # build/dist/aurora-os-0.4.0.zip
+make dist                # build/dist/aurora-os-0.5.0.zip
 ```
 
 Test artefacts (JSON results, serial logs, screenshots) go to
@@ -32,8 +36,11 @@ Test artefacts (JSON results, serial logs, screenshots) go to
    Terminal, Files, Notes, Settings and the compositor are kernel code.
    Moving them out needs IPC (message channels) and shared-memory surfaces.
    This is the largest remaining 0.2 roadmap item.
-2. **Kernel is not preemptible.** This is fine on one CPU. SMP would need
-   locking throughout, LAPIC timers and IOAPIC routing.
+2. **Big kernel lock.** SMP works (1–16 CPUs), but system calls, the VFS,
+   PFS, the network stack, the drivers and the desktop run under the BKL.
+   Next: per-subsystem locks (VFS first), and moving the user page-fault path
+   off the BKL. Also not done in 0.5: an AML interpreter and per-CPU run
+   queues (`docs/decisions.md`).
 3. **No FPU/SSE state** is saved, so user programs are built with
    `-mgeneral-regs-only`. Next step: `fxsave`/`xsave` areas per task with
    lazy switching.
@@ -51,9 +58,10 @@ Test artefacts (JSON results, serial logs, screenshots) go to
 8. **Real hardware**: untested and not claimed. There is no USB stack, and it
    needs PS/2 emulation and an 8259 PIC.
 9. Not started: keyboard layouts, file dialogs, proportional fonts, more
-   graphics modes, audio, USB HID, SMP.
-10. Next: the user's "OS Roadmap 0.5 and Beyond" plan, starting with 0.5
-   (SMP and ACPI).
+   graphics modes, audio, USB HID (planned for 0.7/0.8).
+10. Next: 0.6 (POSIX-ish userland). Decision to settle first: which libc to
+   port (mlibc or newlib) or whether to extend Aurora's own. That needs FPU/SSE
+   state per task (item 3) before any libm or interpreter port.
 
 ## Toolchain on the dev machine (installed with winget)
 

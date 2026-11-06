@@ -65,8 +65,9 @@ pages need no invalidation.
 |---|---|---|
 | Limine boot stack | ≥ 64 KiB | used only until `switch_stack_and_call`, then reclaimed |
 | Kernel stack | 64 KiB | `0xffffd00000001000`, guard page below |
-| IST1 (#DF) | 16 KiB | kernel .bss |
-| IST2 (NMI, #MC) | 16 KiB | kernel .bss |
+| IST1 (#DF) | 16 KiB per CPU | kernel .bss |
+| IST2 (NMI, #MC) | 16 KiB per CPU | kernel .bss |
+| AP start-up stack | the AP's idle-task stack | task stack slot |
 
 A kernel stack overflow faults on the guard page; the resulting #DF runs on
 IST1 and reaches the panic handler.
@@ -91,6 +92,14 @@ IST1 and reaches the panic handler.
 User processes each have their own lower half (see
 [processes.md](processes.md)). The built-in apps are kernel code and are not
 protected from one another.
+
+## SMP
+
+The page allocator, the heap and kernel page-table updates each have a
+spinlock (order heap → vmm → pmm). Freeing a task's kernel stack unmaps it,
+sends a TLB shootdown to the other CPUs, and only then returns the pages
+(`memory/tlb.c`). One page below 1 MiB is reserved at boot for the AP
+trampoline.
 
 ## DMA memory
 

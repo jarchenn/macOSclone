@@ -882,12 +882,13 @@ def main():
     ap.add_argument("--only", nargs="*")
     ap.add_argument("--soak", type=int, default=0, help="run only the soak test for N seconds")
     ap.add_argument("--memory", default="256M")
+    ap.add_argument("--smp", type=int, default=None)
     args = ap.parse_args()
     if not IMG.exists():
         sys.exit("error: build/test/aurora.img missing; run 'python tools/build.py build --variant test'")
     OUT.mkdir(parents=True, exist_ok=True)
     results = []
-    g = Guest(IMG, memory=args.memory, name="interaction", no_reboot=False, keep_dir=OUT / "interaction")
+    g = Guest(IMG, memory=args.memory, name="interaction", no_reboot=False, keep_dir=OUT / "interaction", smp=args.smp)
     try:
         g.start()
         d = Desktop(g)

@@ -32,7 +32,12 @@ typedef void (*irq_handler_t)(void);
 void gdt_init(void);
 void gdt_set_kernel_stack(uint64_t rsp0);
 void idt_init(void);
+void idt_reload(void); /* loads the shared IDT on this CPU */
 void irq_install(unsigned irq, irq_handler_t h);
+/* Unmasks an ISA IRQ on whichever controller is active (PIC or IOAPIC). */
+void irq_enable(unsigned irq);
+/* Handler for a CPU-local vector (LAPIC timer, IPIs); EOI is sent after it. */
+void vector_install(unsigned vector, irq_handler_t h);
 uint64_t interrupt_spurious_count(void);
 uint64_t interrupt_unexpected_count(void);
 

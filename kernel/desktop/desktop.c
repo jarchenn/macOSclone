@@ -36,7 +36,7 @@ static uint64_t last_click_ms;
 static int32_t last_click_x, last_click_y;
 static uint32_t last_click_win;
 static bool reboot_requested;
-static bool poweroff_requested;
+static volatile bool poweroff_requested; /* also set from the ACPI SCI handler */
 static uint64_t last_second;
 
 /* Menus */
@@ -649,16 +649,20 @@ static void handle_key(const struct key_event *e)
 
 static void do_reboot(void)
 {
-    klog("desktop: restart requested; session files in /home will be lost");
+    int sr = vfs_sync();
+    klog("desktop: restart requested (sync %s; %s)", sr ? vfs_strerror(sr) : "ok",
+         vfs_home_persistent() ? "/home is on the data disk" : "RAM files in /home will be lost");
     TEST_EVENT("REBOOT");
+    /* 1. ACPI FADT reset register */
+    acpi_reset();
     cpu_cli();
-    /* 1. 8042 controller reset line pulse */
+    /* 2. 8042 controller reset line pulse */
     for (int i = 0; i < 100000 && (inb(0x64) & 2); i++)
         io_wait();
     outb(0x64, 0xFE);
     for (int i = 0; i < 1000000; i++)
         io_wait();
-    /* 2. Fallback: triple fault via an empty IDT */
+    /* 3. Fallback: triple fault via an empty IDT */
     klog("desktop: 8042 reset failed; forcing triple fault");
     struct PACKED { uint16_t limit; uint64_t base; } idtr = { 0, 0 };
     __asm__ volatile("lidt %0; int3" : : "m"(idtr));
@@ -669,7 +673,7 @@ static void do_reboot(void)
 static bool work_pending(void)
 {
     return byte_ring_count(ps2_kbd_ring()) || byte_ring_count(ps2_mouse_ring()) || events.count ||
-           compositor_pending();
+           compositor_pending() || poweroff_requested;
 }
 
 void desktop_main(void)

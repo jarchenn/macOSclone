@@ -1,6 +1,6 @@
 # Architecture
 
-Aurora 0.4 is a single-CPU x86-64 kernel with preemptively scheduled,
+Aurora 0.5 is an SMP x86-64 kernel (1–16 CPUs; see [smp.md](smp.md)) with preemptively scheduled,
 isolated user processes (ring 3, one address space each; see
 [processes.md](processes.md)). The desktop and its four applications are
 still compiled into the kernel and run as kernel task 0. A fault in a user
@@ -14,8 +14,10 @@ is still a kernel panic.
         pmm_init (bitmap) ─► vmm_init (own page tables, CR3 switch)
    switch_stack_and_call(guarded kernel stack) ──► kmain_stage2
         reclaim bootloader memory ─► heap ─► self-tests
+        scheduler (task 0 = this stack, idle task) ─► BKL
         PIC remap + LAPIC virtual wire ─► PIT 250 Hz ─► PS/2 ─► sti
-        scheduler (task 0 = this stack, idle task) ─► ACPI tables ─► PCI scan
+        ACPI tables ─► LAPIC + IOAPIC (PIC masked) ─► LAPIC timer
+        ─► start APs (INIT-SIPI-SIPI) ─► SCI/power button ─► PCI scan
         VFS: /system (initramfs, RO) + /home (ramfs, RW)
         virtio-blk found? ─► /home moves onto PFS on the data disk
         virtio-net found? ─► network task (DHCP)
@@ -32,7 +34,7 @@ is still a kernel panic.
 | `kernel/include/abi/` | the user/kernel ABI shared with `user/` |
 | `user/` | user runtime (crt0, libc) and the programs in `/system/bin` |
 | `kernel/memory/` | bitmap physical allocator, virtual layout, heap core + kernel heap |
-| `kernel/drivers/` | serial, framebuffer, PIC/LAPIC virtual wire, PIT, PS/2 controller (+ Caps Lock LED), keyboard & mouse decoders, ACPI (S5 power-off), PCI, VirtIO core, virtio-blk, virtio-net |
+| `kernel/drivers/` | serial, framebuffer, PIC, LAPIC + IOAPIC, PIT, PS/2 controller (+ Caps Lock LED), keyboard & mouse decoders, ACPI tables (portable parser) + power, PCI, VirtIO core, virtio-blk, virtio-net |
 | `kernel/fs/` | path rules, VFS core + open-file table, ramfs and read-only backends, initramfs parser, PFS (persistent, copy-on-write) |
 | `kernel/graphics/` | rect math, surfaces + primitives, compositor, diagnostic console |
 | `kernel/desktop/` | theme/wallpaper/icons, window manager, widgets, desktop shell (menus, dock, input routing, loop) |
@@ -54,9 +56,11 @@ and are compiled unchanged into the host tests.
    calls `interrupt_dispatch(frame)`.
 3. Vectors 0–31: taken in user mode (CS RPL 3) → `process_fault` kills the
    process; taken in kernel mode → `panic_exception`. #DF runs on IST1 and
-   NMI/#MC on IST2, so a stack overflow into the guard page still reports.
+   NMI/#MC on IST2 (per CPU), so a stack overflow into the guard page still
+   reports. Entries from ring 3 execute SWAPGS first (per-CPU data).
    Vector 0x80 (DPL 3 gate) → `syscall_dispatch`.
-4. Vectors 0x20–0x2F → spurious check (IRQ7/15 ISR read) → registered
+4. Vectors 0x20–0x2F (PIC until the IOAPIC takes over, then IOAPIC → LAPIC
+   EOI; 0x40–0x43 are LAPIC timer and IPIs) → spurious check (IRQ7/15 ISR read) → registered
    handler → EOI (slave then master for IRQ ≥ 8).
 
 All IDT entries are interrupt gates, so IF is clear inside handlers (the

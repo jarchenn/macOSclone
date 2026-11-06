@@ -1,6 +1,6 @@
 # Testing
 
-Five layers: host, smoke, interaction, storage and network. Host tests do not replace guest tests.
+Six layers: host, smoke, interaction, storage, network and SMP. Host tests do not replace guest tests. Every guest suite can run with N virtual CPUs (`AURORA_TEST_SMP=N`), and every guest wait fails on a lock-validator (`LOCKDEP`) report as well as on a panic.
 
 ## 1. Host unit tests: `make test`
 
@@ -18,12 +18,13 @@ compiler supports them (llvm-mingw on Windows does).
 | apps | 101 | quoting/escapes, 200-char and 16-arg limits, text-buffer boundaries and the 16 KiB cap, selection and clipboard (replace, backward selection, all-or-nothing paste), formatter |
 | memory | 2951 | heap alignment, coalescing, bounded growth over 1000 cycles, double/invalid/interior frees, limits and overflow; page allocator over a simulated map: unique pages, unaligned regions, invalid and double frees, reclaim, contiguous runs |
 
+| acpi | 62 | RSDP/RSDT/XSDT/FADT/MADT/HPET parsing from synthetic tables: checksums, absurd lengths, zero-length and overlong MADT entries, CPU limit, ISO lookup, BIOS-area scan, damaged `\_S5` |
 | elf | 30 | every ELF validation error: truncation, class, type, machine, phdr bounds, segment range, overlap, W+X, entry, size |
 | net | 122 | IPv4/UDP/TCP/ICMP checksums and parsing, truncated and bad-length packets, DNS query building and answer parsing (compression, loops, CNAME, NXDOMAIN), DHCP options |
 | pfs | 61 | format/mount/commit, a simulated power loss after every block write of a commit, torn superblocks, corrupt catalogs, refusing foreign disks, space limits |
 | vfs_disk | 49 | the VFS on PFS: create/write/remove/rename persisted across remount, busy and non-empty errors |
 
-Final run: **9/9 suites, 7191 checks, 0 failures** (ASan+UBSan on).
+Final run: **10/10 suites, 7257 checks, 0 failures** (ASan+UBSan on).
 
 ## 2. Real-guest smoke tests: `make smoke`
 
@@ -80,6 +81,15 @@ Files, Terminal and user programs see the disk state. Result: **5/5**.
 `tools/network_test.py` starts DNS, UDP-echo, TCP-echo and HTTP servers on
 the host and drives the guest's programs against them through slirp. Result:
 **9/9** (details in [networking.md](networking.md)).
+
+## 6. SMP and ACPI: `make smp`, `make stress`
+
+`tools/smp_test.py` (details in [smp.md](smp.md)): boots at 1, 2, 4 and 8
+CPUs and checks every CPU's counters; checks that CPU-bound processes get
+user time on all four CPUs; runs the TLB shootdown test with its control;
+checks that QMP `system_powerdown` shuts down cleanly with a file that is
+intact after reboot; and runs the `-smp 8` stress. Result: **7/7**, plus the
+30-minute stress (see `STATUS.md`).
 
 ## Manual checks
 

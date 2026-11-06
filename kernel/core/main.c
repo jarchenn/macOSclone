@@ -16,12 +16,17 @@
 #include "memory/heap.h"
 #include "fs/vfs.h"
 #include "core/sched.h"
+#include "core/spinlock.h"
 #include "net/net.h"
 #include "drivers/pci.h"
 #include "drivers/blk.h"
 #include "drivers/acpi.h"
+#include "drivers/apic.h"
+#include "arch/smp.h"
+#include "memory/tlb.h"
 #include "desktop/desktop.h"
 #include "lib.h"
+void panic_halt_ipi(void);
 #include "limine.h"
 
 NORETURN void kmain_early(void);
@@ -121,6 +126,7 @@ static NORETURN void kmain_stage2(void)
     selftest_heap();
     klog("AURORA_MILESTONE memory");
     sched_init();
+    bkl_lock(); /* the desktop task (this context) runs kernel code under the BKL */
 
     pic_init();
     lapic_virtual_wire(g_vmm.lapic);
@@ -133,6 +139,18 @@ static NORETURN void kmain_stage2(void)
     if (time_ticks() < t0 + 3)
         panic("timer: PIT interrupts are not arriving");
     klog("timer: PIT %u Hz (divisor %u), ticks advancing", PIT_TARGET_HZ, pit_divisor());
+    if (!acpi_init())
+        klog("acpi: not available; power-off falls back to the QEMU PM port");
+    if (apic_init()) {
+        vector_install(APIC_TIMER_VECTOR, apic_timer_tick);
+        vector_install(IPI_RESCHED_VECTOR, sched_resched_ipi);
+        vector_install(IPI_TLB_VECTOR, tlb_ipi_handler);
+        vector_install(IPI_HALT_VECTOR, panic_halt_ipi);
+        if (!apic_timer_start())
+            klog("apic: LAPIC timer unusable; the PIT keeps driving the scheduler");
+        smp_init();
+    }
+    acpi_setup_sci();
     klog("AURORA_MILESTONE interrupts");
 
 #ifdef AURORA_PANIC_TEST
@@ -155,8 +173,6 @@ static NORETURN void kmain_stage2(void)
             klog("vfs: initramfs %s (%llu bytes) mounted at /system, seeded /home", initrd->path,
                  (unsigned long long)initrd->size);
     }
-    if (!acpi_init())
-        klog("acpi: not available; power-off falls back to the QEMU PM port");
     pci_init();
     if (vblk_init()) {
         bool formatted = false;

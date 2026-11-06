@@ -1,6 +1,7 @@
 # Input, timing and interrupts
 
-The reference machine uses legacy devices: 8259 PIC pair, 8253/8254 PIT and
+(Since 0.5, ISA IRQs move from the 8259 PIC to the IOAPIC once ACPI is parsed;
+see [smp.md](smp.md).) The reference machine uses legacy devices: 8259 PIC pair, 8253/8254 PIT and
 the i8042 PS/2 controller. APIC/IOAPIC support is roadmap work; the only APIC
 code in 0.1 puts the local APIC into virtual-wire mode (see boot.md).
 

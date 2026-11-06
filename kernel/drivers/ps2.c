@@ -221,10 +221,10 @@ bool ps2_init(void)
     ctrl_write_data((uint8_t)cfg);
 
     irq_install(IRQ_KEYBOARD, kbd_irq);
-    pic_unmask(IRQ_KEYBOARD);
+    irq_enable(IRQ_KEYBOARD);
     if (have_mouse) {
         irq_install(IRQ_MOUSE, mouse_irq);
-        pic_unmask(IRQ_MOUSE);
+        irq_enable(IRQ_MOUSE);
     }
     klog("ps2: keyboard %s, mouse %s (3-byte packets)", have_kbd ? "ok" : "missing", have_mouse ? "ok" : "missing");
     return have_kbd;

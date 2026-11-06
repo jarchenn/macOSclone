@@ -30,11 +30,11 @@ import make_initramfs  # noqa: E402
 
 ROOT = env.ROOT
 BUILD = env.BUILD
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 VARIANTS = {
     "release": [],
-    "test": ["-DAURORA_TEST=1"],
+    "test": ["-DAURORA_TEST=1", "-DAURORA_LOCKDEP=1"],
     "panic": ["-DAURORA_TEST=1", "-DAURORA_PANIC_TEST=1"],
 }
 
@@ -85,6 +85,7 @@ HOST_TEST_SOURCES = [
     "kernel/core/elf.c",
     "kernel/fs/pfs.c",
     "kernel/net/proto.c",
+    "kernel/drivers/acpi_tables.c",
 ]
 
 
@@ -472,6 +473,7 @@ def main():
         r = sub.add_parser(name)
         r.add_argument("--variant", default="release", choices=list(VARIANTS))
         r.add_argument("--memory", default="256M")
+        r.add_argument("--smp", type=int, default=1, help="number of virtual CPUs")
         r.add_argument("--bios", action="store_true", help="boot via SeaBIOS instead of OVMF")
         r.add_argument("--no-disk", action="store_true", help="no persistent data disk (/home in RAM)")
         r.add_argument("--no-net", action="store_true", help="no network card")
@@ -516,7 +518,7 @@ def cmd_run_wrapper(args, gdb):
             print(f"created {rel(disk)} (32 MiB persistent /home)")
     cmd = env.qemu_command(img, vc, memory=args.memory, firmware="bios" if args.bios else "uefi",
                            serial="stdio", no_reboot=False, gdb=gdb, data_disk=disk,
-                           network=None if args.no_net else True)
+                           network=None if args.no_net else True, smp=args.smp)
     print("+ " + " ".join(f'"{c}"' if " " in c else c for c in cmd))
     if gdb:
         print("GDB stub listening on tcp::1234; the guest is paused until a debugger continues it.")

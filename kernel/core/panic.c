@@ -6,6 +6,8 @@
 #include "arch/x86_64/io.h"
 #include "drivers/serial.h"
 #include "graphics/console.h"
+#include "drivers/apic.h"
+#include "arch/percpu.h"
 #include "lib.h"
 
 static volatile int panicking;
@@ -34,6 +36,10 @@ static NORETURN void halt_forever(void)
     }
 }
 
+/* IPI_HALT_VECTOR handler: another CPU panicked. */
+NORETURN void panic_halt_ipi(void);
+NORETURN void panic_halt_ipi(void) { halt_forever(); }
+
 static bool enter_panic(void)
 {
     cpu_cli();
@@ -42,6 +48,11 @@ static bool enter_panic(void)
         serial_write("\nAURORA_PANIC (recursive)\n", 26);
         return false;
     }
+    /* Stop the other CPUs so they cannot interleave output or keep changing
+     * state; never wait for the log lock a halted CPU may hold. */
+    if (g_ncpus_online > 1 && apic_active())
+        lapic_broadcast_ipi(IPI_HALT_VECTOR);
+    klog_force_unlock();
     klog_set_console(false);
     console_begin_panic();
     return true;
@@ -68,6 +79,7 @@ void panic(const char *fmt, ...)
     if (!enter_panic())
         halt_forever();
     out("\n*** AURORA_PANIC ***\n");
+    outf("on cpu %u of %u online\n", this_cpu()->index, g_ncpus_online);
     va_list ap;
     va_start(ap, fmt);
     k_vsnprintf(panic_buf, sizeof panic_buf, fmt, ap);
@@ -95,6 +107,7 @@ void panic_exception(const struct interrupt_frame *f)
         halt_forever();
     uint64_t v = f->vector;
     out("\n*** AURORA_PANIC ***\n");
+    outf("on cpu %u of %u online\n", this_cpu()->index, g_ncpus_online);
     outf("CPU exception %llu: %s\n", (unsigned long long)v, v < 32 ? exception_names[v] : "?");
     outf("error_code=%016llx  rip=%016llx  cs=%04llx  rflags=%016llx\n",
          (unsigned long long)f->error_code, (unsigned long long)f->rip,

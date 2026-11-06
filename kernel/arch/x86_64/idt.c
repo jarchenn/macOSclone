@@ -42,6 +42,11 @@ void idt_init(void)
         /* Only the system-call vector may be raised from ring 3 with INT. */
         set_gate(v, (uint64_t)(uintptr_t)(isr_stub_table + v * 16), ist, v == SYSCALL_VECTOR ? 3 : 0);
     }
+    idt_reload();
+}
+
+void idt_reload(void)
+{
     struct idtr r = { sizeof idt - 1, (uint64_t)(uintptr_t)idt };
     __asm__ volatile("lidt %0" : : "m"(r) : "memory");
 }

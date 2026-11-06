@@ -1,13 +1,16 @@
 /* Kernel global heap: the portable allocator core backed by on-demand page
- * mappings in the VMM heap region. Main-loop (non-IRQ) context only. */
+ * mappings in the VMM heap region. Task context only (never IRQ handlers);
+ * SMP-safe through heap_lock (lock order: heap -> vmm -> pmm). */
 #include "memory/heap.h"
 #include "memory/physical.h"
 #include "memory/virtual.h"
 #include "core/log.h"
 #include "core/panic.h"
+#include "core/spinlock.h"
 #include "lib.h"
 
 static struct heap kheap;
+static DEFINE_SPINLOCK(heap_lock, "heap");
 static bool ready;
 
 static bool kheap_grow(void *ctx, uintptr_t end, size_t bytes)
@@ -40,7 +43,10 @@ void *kmalloc(size_t n)
 {
     if (!ready)
         panic("kmalloc before kheap_init");
-    return heap_alloc(&kheap, n);
+    uint64_t f = spin_lock_irqsave(&heap_lock);
+    void *p = heap_alloc(&kheap, n);
+    spin_unlock_irqrestore(&heap_lock, f);
+    return p;
 }
 
 void *kzalloc(size_t n)
@@ -58,6 +64,24 @@ void *kcalloc(size_t count, size_t size)
     return kzalloc(count * size);
 }
 
-void kfree(void *p) { heap_free(&kheap, p); }
-void kheap_stats(struct heap_stats *out) { *out = kheap.stats; }
-bool kheap_check(void) { return heap_check(&kheap); }
+void kfree(void *p)
+{
+    uint64_t f = spin_lock_irqsave(&heap_lock);
+    heap_free(&kheap, p);
+    spin_unlock_irqrestore(&heap_lock, f);
+}
+
+void kheap_stats(struct heap_stats *out)
+{
+    uint64_t f = spin_lock_irqsave(&heap_lock);
+    *out = kheap.stats;
+    spin_unlock_irqrestore(&heap_lock, f);
+}
+
+bool kheap_check(void)
+{
+    uint64_t f = spin_lock_irqsave(&heap_lock);
+    bool ok = heap_check(&kheap);
+    spin_unlock_irqrestore(&heap_lock, f);
+    return ok;
+}

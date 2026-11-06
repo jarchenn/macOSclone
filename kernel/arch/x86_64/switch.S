@@ -46,9 +46,8 @@ enter_user:
     mov $0x1B, %ax
     mov %ax, %ds
     mov %ax, %es
-    xor %eax, %eax
-    mov %ax, %fs
-    mov %ax, %gs
+    /* FS/GS selectors are left alone: loading them could clear the kernel
+     * GS base. The user GS base (KERNEL_GS_BASE) is 0. */
     pushq $0x1B             /* SS */
     pushq %rsi              /* RSP */
     pushq $0x202            /* RFLAGS: IF set */
@@ -69,7 +68,23 @@ enter_user:
     xor %r13d, %r13d
     xor %r14d, %r14d
     xor %r15d, %r15d
+    swapgs                  /* kernel per-CPU base -> KERNEL_GS_BASE */
     iretq
     .size enter_user, . - enter_user
+
+/* int probe_read64(const uint64_t *addr, uint64_t *out)
+ * Reads one word; returns 0, or -1 if the read faulted. A kernel page fault
+ * whose RIP is probe_read64 resumes at probe_read64_fault (interrupts.c). */
+    .global probe_read64, probe_read64_fault
+    .type probe_read64, @function
+probe_read64:
+    mov (%rdi), %rax
+    mov %rax, (%rsi)
+    xor %eax, %eax
+    ret
+probe_read64_fault:
+    mov $-1, %eax
+    ret
+    .size probe_read64, . - probe_read64
 
     .section .note.GNU-stack, "", @progbits

@@ -2,6 +2,7 @@
  * against the calling process's page tables before it is touched. */
 #include "core/process.h"
 #include "core/sched.h"
+#include "core/spinlock.h"
 #include "core/time.h"
 #include "core/log.h"
 #include "arch/cpu.h"
@@ -259,6 +260,7 @@ void syscall_dispatch(struct interrupt_frame *f)
     }
     p->syscalls++;
     cpu_sti(); /* kernel code is not preempted, but IRQs keep flowing */
+    bkl_lock(); /* system calls run under the big kernel lock (0.5) */
     uint64_t a = f->rdi, b = f->rsi, c = f->rdx, d = f->r10, e = f->r8;
     long r;
     switch (f->rax) {
@@ -349,4 +351,5 @@ void syscall_dispatch(struct interrupt_frame *f)
     if (p->kill_pending && r >= 0)
         r = AE_INTR;
     f->rax = (uint64_t)(int64_t)r;
+    bkl_unlock();
 }

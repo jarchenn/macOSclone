@@ -1,156 +1,194 @@
-/* ACPI power-off. Tables are reached through the HHDM, which maps the ACPI
- * memory map regions read-only (see vmm_init). The \_S5 package is located
- * by a byte scan of the DSDT (the common technique without an AML
- * interpreter): NameOp "_S5_" PackageOp ... SLP_TYPa, SLP_TYPb. */
+/* ACPI glue: finds the RSDP (Limine handoff, then a BIOS-area scan), runs
+ * the portable table parser (drivers/acpi_tables.c), and implements S5
+ * power-off, the FADT reset register and the fixed power-button event.
+ *
+ * Tables are read through the HHDM, which maps ACPI memory read-only (see
+ * vmm_init); anything else is mapped on demand through the MMIO window. The
+ * \_S5 package is found by a byte scan of the DSDT: there is no AML
+ * interpreter. */
 #include "drivers/acpi.h"
+#include "drivers/acpi_tables.h"
 #include "core/boot.h"
 #include "core/log.h"
 #include "core/time.h"
+#include "memory/virtual.h"
 #include "arch/x86_64/io.h"
+#include "arch/cpu.h"
+#include "core/sched.h"
+#include "desktop/desktop.h"
 #include "lib.h"
 
-static bool ready;
-static uint16_t pm1a_cnt, pm1b_cnt;
-static uint16_t slp_typa, slp_typb;
-static char desc[96] = "ACPI not found";
+static struct acpi_info info;
+static bool parsed, s5_ready;
+static char desc[128] = "ACPI not found";
+static const char *rsdp_source = "none";
 
-bool acpi_available(void) { return ready; }
+bool acpi_available(void) { return s5_ready; }
 const char *acpi_describe(void) { return desc; }
+const struct acpi_info *acpi_info(void) { return parsed ? &info : NULL; }
 
-static bool checksum_ok(const uint8_t *p, size_t len)
+/* Readable view of [phys, phys+len): the HHDM if every page is mapped there,
+ * otherwise a read-only MMIO-window mapping. */
+static const uint8_t *map_phys(void *ctx, uint64_t phys, uint32_t len)
 {
-    uint8_t s = 0;
-    for (size_t i = 0; i < len; i++)
-        s = (uint8_t)(s + p[i]);
-    return s == 0;
+    UNUSED(ctx);
+    if (!len || phys + len < phys)
+        return NULL;
+    bool in_hhdm = true;
+    for (uint64_t p = ALIGN_DOWN(phys, PAGE_SIZE); p < phys + len; p += PAGE_SIZE)
+        if (!vmm_translate(p + g_boot.hhdm_offset)) {
+            in_hhdm = false;
+            break;
+        }
+    if (in_hhdm)
+        return phys_to_virt(phys);
+    if (len > (1u << 20))
+        return NULL;
+    return vmm_map_mmio(phys, len, false);
 }
 
-static const uint8_t *map_table(uint64_t phys)
+static const uint8_t *find_rsdp(void)
 {
-    if (!phys)
-        return NULL;
-    const uint8_t *t = phys_to_virt(phys);
-    uint32_t len;
-    memcpy(&len, t + 4, 4);
-    if (len < 36 || len > (4u << 20) || !checksum_ok(t, len))
-        return NULL;
-    return t;
-}
-
-static bool parse_s5(const uint8_t *dsdt, uint32_t len)
-{
-    for (uint32_t i = 0; i + 4 < len; i++) {
-        if (memcmp(dsdt + i, "_S5_", 4))
-            continue;
-        /* NameOp (0x08), optionally preceded by the root prefix '\'. */
-        if (!(i >= 1 && (dsdt[i - 1] == 0x08 || (i >= 2 && dsdt[i - 2] == 0x08 && dsdt[i - 1] == '\\'))))
-            continue;
-        uint32_t o = i + 4;
-        if (o >= len || dsdt[o] != 0x12) /* PackageOp */
-            continue;
-        o++;
-        o += (uint32_t)((dsdt[o] >> 6) & 3) + 1; /* PkgLength */
-        o++;                                      /* NumElements */
-        uint16_t vals[2];
-        for (int k = 0; k < 2; k++) {
-            if (o >= len)
-                return false;
-            uint8_t b = dsdt[o];
-            if (b == 0x0A) { /* BytePrefix */
-                if (o + 1 >= len)
-                    return false;
-                vals[k] = dsdt[o + 1];
-                o += 2;
-            } else if (b == 0x00 || b == 0x01) { /* ZeroOp / OneOp */
-                vals[k] = b;
-                o++;
-            } else {
-                return false;
+    if (g_boot.rsdp_phys) {
+        const uint8_t *r = map_phys(NULL, g_boot.rsdp_phys, 36);
+        if (r && !memcmp(r, "RSD PTR ", 8) && acpi_checksum_ok(r, 20)) {
+            rsdp_source = "bootloader";
+            return r;
+        }
+    }
+    /* Fallback for firmware that did not pass one: the first KiB of the EBDA,
+     * then the BIOS ROM area 0xE0000-0xFFFFF (ACPI spec 5.2.5.1). */
+    const uint8_t *bda = map_phys(NULL, 0x40E, 2);
+    if (bda) {
+        uint64_t ebda = (uint64_t)(bda[0] | bda[1] << 8) << 4;
+        if (ebda >= 0x80000 && ebda < 0xA0000) {
+            const uint8_t *e = map_phys(NULL, ebda, 1024);
+            const uint8_t *r = e ? acpi_scan_rsdp(e, 1024) : NULL;
+            if (r) {
+                rsdp_source = "EBDA scan";
+                return r;
             }
         }
-        slp_typa = vals[0];
-        slp_typb = vals[1];
-        return true;
     }
-    return false;
+    const uint8_t *rom = map_phys(NULL, 0xE0000, 0x20000);
+    const uint8_t *r = rom ? acpi_scan_rsdp(rom, 0x20000) : NULL;
+    if (r)
+        rsdp_source = "BIOS area scan";
+    return r;
 }
 
 bool acpi_init(void)
 {
-    if (!g_boot.rsdp_phys)
+    const uint8_t *rsdp = find_rsdp();
+    if (!rsdp) {
+        klog("acpi: no RSDP found");
         return false;
-    const uint8_t *rsdp = phys_to_virt(g_boot.rsdp_phys);
-    if (memcmp(rsdp, "RSD PTR ", 8) || !checksum_ok(rsdp, 20))
-        return false;
-    uint8_t rev = rsdp[15];
-    uint64_t xsdt = 0;
-    uint32_t rsdt = 0;
-    memcpy(&rsdt, rsdp + 16, 4);
-    if (rev >= 2)
-        memcpy(&xsdt, rsdp + 24, 8);
-    const uint8_t *root = map_table(xsdt ? xsdt : rsdt);
-    if (!root)
-        return false;
-    uint32_t rlen;
-    memcpy(&rlen, root + 4, 4);
-    size_t esz = xsdt ? 8 : 4;
-    const uint8_t *fadt = NULL;
-    for (size_t off = 36; off + esz <= rlen; off += esz) {
-        uint64_t p = 0;
-        memcpy(&p, root + off, esz);
-        const uint8_t *t = map_table(p);
-        if (t && !memcmp(t, "FACP", 4)) {
-            fadt = t;
-            break;
-        }
     }
-    if (!fadt)
+    int r = acpi_parse(rsdp, map_phys, NULL, &info);
+    if (r == ACPI_E_RSDP || r == ACPI_E_ROOT) {
+        klog("acpi: root tables invalid (%d)", r);
         return false;
-    uint32_t flen, dsdt32 = 0, smi_cmd = 0, a = 0, b = 0;
-    memcpy(&flen, fadt + 4, 4);
-    memcpy(&dsdt32, fadt + 40, 4);
-    memcpy(&smi_cmd, fadt + 48, 4);
-    uint8_t acpi_enable = fadt[52];
-    memcpy(&a, fadt + 64, 4);
-    memcpy(&b, fadt + 68, 4);
-    uint64_t dsdt = dsdt32;
-    if (flen >= 148) {
-        uint64_t x = 0;
-        memcpy(&x, fadt + 140, 8);
-        if (x)
-            dsdt = x;
     }
-    pm1a_cnt = (uint16_t)a;
-    pm1b_cnt = (uint16_t)b;
-    const uint8_t *d = map_table(dsdt);
-    if (!d || !pm1a_cnt)
-        return false;
-    uint32_t dlen;
-    memcpy(&dlen, d + 4, 4);
-    if (!parse_s5(d + 36, dlen - 36))
-        return false;
+    parsed = true;
+    klog("acpi: rev %u via %s, %s; MADT %s: %d CPU(s), %d IOAPIC(s), %d override(s), LAPIC %x, "
+         "%u skipped; HPET %s; reset %s",
+         info.revision, rsdp_source, info.xsdt ? "XSDT" : "RSDT", info.have_madt ? "ok" : "missing",
+         info.ncpus, info.nioapics, info.nisos, info.lapic_address, info.skipped_entries,
+         info.have_hpet ? "present" : "absent", info.have_reset ? "register" : "none");
+    if (!info.have_fadt || !info.have_s5 || !info.pm1a_cnt) {
+        klog("acpi: S5 not available (FADT %d, _S5 %d)", info.have_fadt, info.have_s5);
+        return true;
+    }
     /* Switch to ACPI mode if the firmware left it in legacy mode. */
-    if (smi_cmd && acpi_enable && !(inw(pm1a_cnt) & 1)) {
-        outb((uint16_t)smi_cmd, acpi_enable);
-        for (int i = 0; i < 300 && !(inw(pm1a_cnt) & 1); i++)
+    if (info.smi_cmd && info.acpi_enable && !(inw((uint16_t)info.pm1a_cnt) & 1)) {
+        outb((uint16_t)info.smi_cmd, info.acpi_enable);
+        for (int i = 0; i < 300 && !(inw((uint16_t)info.pm1a_cnt) & 1); i++)
             time_sleep_ms(1);
     }
-    ready = true;
-    k_snprintf(desc, sizeof desc, "ACPI rev %u, PM1a_CNT 0x%x, S5 type %u", rev, pm1a_cnt, slp_typa);
+    s5_ready = true;
+    k_snprintf(desc, sizeof desc, "ACPI rev %u, PM1a_CNT 0x%x, S5 type %u, %d CPU(s) in MADT", info.revision,
+               info.pm1a_cnt, info.slp_typa, info.ncpus);
     klog("acpi: %s", desc);
     return true;
 }
 
 void acpi_poweroff(void)
 {
-    if (!ready)
+    if (!s5_ready)
         return;
     klog("acpi: entering S5 (power off)");
     cpu_cli();
-    outw(pm1a_cnt, (uint16_t)(slp_typa << 10 | 1u << 13));
-    if (pm1b_cnt)
-        outw(pm1b_cnt, (uint16_t)(slp_typb << 10 | 1u << 13));
+    outw((uint16_t)info.pm1a_cnt, (uint16_t)(info.slp_typa << 10 | 1u << 13));
+    if (info.pm1b_cnt)
+        outw((uint16_t)info.pm1b_cnt, (uint16_t)(info.slp_typb << 10 | 1u << 13));
     for (int i = 0; i < 1000000; i++)
         io_wait();
     cpu_sti();
+}
+
+bool acpi_reset(void)
+{
+    if (!parsed || !info.have_reset)
+        return false;
+    klog("acpi: reset via FADT reset register (%s 0x%llx <- 0x%x)", info.reset_reg.space ? "port" : "mmio",
+         (unsigned long long)info.reset_reg.address, info.reset_value);
+    if (info.reset_reg.space == 1) {
+        outb((uint16_t)info.reset_reg.address, info.reset_value);
+    } else {
+        volatile uint8_t *p = vmm_map_mmio(info.reset_reg.address, 1, true);
+        if (!p)
+            return false;
+        *p = info.reset_value;
+    }
+    for (int i = 0; i < 100000; i++)
+        io_wait();
+    return false; /* still running: the caller falls back */
+}
+
+/* Fixed power-button event (PM1 status bit 8, enable bit 8). */
+#define PWRBTN (1u << 8)
+
+bool acpi_enable_power_button(void)
+{
+    if (!parsed || !info.pm1a_evt || info.pm1_evt_len < 4)
+        return false;
+    uint16_t half = info.pm1_evt_len / 2;
+    outw((uint16_t)info.pm1a_evt, PWRBTN); /* clear stale status (write 1) */
+    outw((uint16_t)(info.pm1a_evt + half), (uint16_t)(inw((uint16_t)(info.pm1a_evt + half)) | PWRBTN));
+    return true;
+}
+
+bool acpi_power_button_pressed(void)
+{
+    if (!parsed || !info.pm1a_evt || info.pm1_evt_len < 4)
+        return false;
+    uint16_t sts = inw((uint16_t)info.pm1a_evt);
+    if (!(sts & PWRBTN))
+        return false;
+    outw((uint16_t)info.pm1a_evt, PWRBTN);
+    return true;
+}
+
+uint16_t acpi_sci_irq(void) { return parsed ? info.sci_irq : 0; }
+
+/* SCI (level-triggered): the only event Aurora enables is the fixed power
+ * button. Pressing it (QEMU: system_powerdown) starts an orderly shutdown
+ * in the desktop task, which syncs /home before entering S5. */
+static void sci_handler(void)
+{
+    if (acpi_power_button_pressed()) {
+        klog("acpi: power button pressed");
+        desktop_request_poweroff();
+        sched_wake(sched_desktop());
+    }
+}
+
+bool acpi_setup_sci(void)
+{
+    if (!acpi_enable_power_button() || !info.sci_irq || info.sci_irq >= 16)
+        return false;
+    irq_install(info.sci_irq, sci_handler);
+    irq_enable(info.sci_irq);
+    klog("acpi: SCI on IRQ %u, power button enabled", info.sci_irq);
+    return true;
 }

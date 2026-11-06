@@ -2,7 +2,8 @@
 
 Aurora is an original, experimental x86-64 operating system with a calm,
 software-rendered desktop. It has its own kernel (memory management,
-interrupts, a preemptive scheduler, isolated user processes, drivers), a
+interrupts, an SMP scheduler for up to 16 CPUs, isolated user processes,
+ACPI and APIC support, drivers), a
 persistent filesystem on a VirtIO disk, an IPv4/TCP network stack, a
 compositor, a window manager and four built-in apps: **Terminal, Files, Notes
 and Settings/About**. It boots with the Limine bootloader and runs on emulated
@@ -55,6 +56,9 @@ formats it and keeps `/home` there. Delete it to start over.
 removes the NIC. Aurora never writes to any disk other than the image files
 you pass to QEMU.
 
+`make run SMP=4` (or `python tools/build.py run --smp 4`) boots with four
+virtual CPUs; the Terminal's `cpus` command shows what each one is doing.
+
 KVM is not needed. Everything runs under QEMU's software emulation (TCG),
 including on arm64 hosts, where the guest is still x86-64 and is emulated.
 `make run-bios` boots the same image through SeaBIOS instead. `MEM=512M make
@@ -100,7 +104,7 @@ With the data disk attached (the default for `make run`), **files in
 stored in memory and reset when Aurora restarts. The apps say which mode is
 active. `/system` is read-only.
 
-## What 0.4 is, and is not
+## What 0.5 is, and is not
 
 * User programs run in ring 3 with their own address spaces and are
   preemptively scheduled. A crashing program is killed and nothing else is
@@ -111,8 +115,12 @@ active. `/system` is read-only.
   floating point in user programs**.
 * Networking covers IPv4, ICMP, UDP, DHCP, DNS and a TCP client (no
   server sockets, no congestion control, **no TLS**: `https://` is refused).
-* One CPU. There is no audio, USB, user accounts, keyboard layouts other
-  than US, proportional fonts or file dialogs.
+* SMP: user programs run in parallel on all CPUs, but most kernel code
+  (system calls, files, network, the desktop) still runs under one big
+  kernel lock, so it does not scale yet. There is no AML interpreter: ACPI
+  covers power-off, the power button and reset only.
+* There is no audio, USB, user accounts, keyboard layouts other than US,
+  proportional fonts or file dialogs.
 * It is tested on QEMU's `pc` machine with PS/2 input, the std VGA
   framebuffer and VirtIO disk/NIC only. Real hardware is untested and
   unsupported.
@@ -132,9 +140,11 @@ See [STATUS.md](STATUS.md) for the acceptance matrix with evidence and
 | `make integration` | drives the real guest with QMP mouse/keyboard input and checks windows, files, limits, processes, resize, clipboard, LEDs and power-off |
 | `make storage` | data-disk persistence and crash-consistency tests (hard QEMU kills) |
 | `make network` | networking tests against servers started on the host |
+| `make smp` | boots at 1/2/4/8 CPUs, per-CPU work, TLB shootdown, ACPI power button, 2-minute 8-CPU stress |
+| `make stress` | the 30-minute 8-CPU stress run (0.5 acceptance) |
 | `make soak` | 4-minute random input and idle soak |
 | `make check` | ELF/image consistency checks (non-PIE, higher half, W^X segments, Limine markers, no undefined symbols) |
-| `make dist` | `build/dist/aurora-os-0.4.0.zip` with source, image, kernel and docs |
+| `make dist` | `build/dist/aurora-os-0.5.0.zip` with source, image, kernel and docs |
 | `make clean` | removes `build/` only |
 
 Build variants: `release`, `test` (adds `@@` serial markers used by the
@@ -143,10 +153,10 @@ commands), and `panic`
 (deliberately dereferences NULL after boot).
 
 Documentation: [architecture](docs/architecture.md), [boot](docs/boot.md),
-[memory](docs/memory.md), [processes](docs/processes.md),
+[memory](docs/memory.md), [processes](docs/processes.md), [SMP](docs/smp.md),
 [input](docs/input.md), [filesystem](docs/filesystem.md),
 [networking](docs/networking.md), [testing](docs/testing.md),
-[roadmap](docs/roadmap.md), [dependencies](DEPENDENCIES.md).
+[roadmap](docs/roadmap.md), [decisions](docs/decisions.md), [dependencies](DEPENDENCIES.md).
 
 License: MIT for Aurora's own code. Limine is BSD-2-Clause, `limine.h` is
 0BSD, and the Spleen font is BSD-2-Clause.

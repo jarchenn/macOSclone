@@ -1,6 +1,7 @@
 /* Process creation, ELF loading, exit/kill/fault handling, user memory. */
 #include "core/process.h"
 #include "core/sched.h"
+#include "core/spinlock.h"
 #include "core/elf.h"
 #include "core/log.h"
 #include "core/panic.h"
@@ -144,6 +145,7 @@ static void proc_entry(void *arg)
     /* The argument string sits in the top 256 bytes of the stack. */
     uint64_t args_va = AURORA_USER_STACK_TOP - AURORA_USER_ARGS_MAX;
     uint64_t rsp = ALIGN_DOWN(args_va - 64, 16);
+    bkl_release_all(); /* user mode never holds the BKL */
     enter_user(p->entry, rsp, args_va, strlen(p->args));
 }
 
@@ -300,8 +302,10 @@ NORETURN void process_exit(int status, const char *reason)
 void process_check_kill(void)
 {
     struct process *p = process_current();
-    if (p && p->kill_pending)
+    if (p && p->kill_pending) {
+        bkl_lock();
         process_exit(-1, "killed");
+    }
 }
 
 int process_kill(int pid)
@@ -334,6 +338,7 @@ NORETURN void process_fault(const struct interrupt_frame *f)
                    (unsigned long long)f->rip);
     }
     cpu_sti();
+    bkl_lock(); /* tearing the process down touches shared kernel state */
     process_exit(128 + (int)v, reason);
 }
 

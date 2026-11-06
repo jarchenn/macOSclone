@@ -12,12 +12,13 @@ kernel task. Only the programs in `/system/bin` are user processes.
   live in fixed slots at `VMM_STACK_BASE + 1 MiB`.
 * `context_switch` (`arch/x86_64/switch.S`) saves rbp, rbx, r12–r15 and
   rflags. A new task starts in `task_trampoline`.
-* Round-robin with a 3-tick slice (12 ms at 250 Hz). The PIT IRQ calls
-  `sched_tick`.
+* Round-robin with a 3-tick slice (12 ms at 250 Hz) on every CPU. Each
+  CPU's LAPIC timer calls `sched_tick` (the PIT before the APIC is up). See
+  [smp.md](smp.md) for SMP scheduling, locking and the big kernel lock.
 * **The kernel is not preemptible.** The timer only switches tasks when it
   interrupts user mode or the idle task. Kernel code gives up the CPU
   explicitly: `sched_block`, `sched_sleep_ms`, `sched_wait_on`, or a
-  blocking syscall. This keeps the single-CPU kernel free of locks.
+  blocking syscall.
 * The desktop blocks in `sched_block` when it has nothing to do. PS/2 IRQs
   and the timer wake it.
 
@@ -96,7 +97,7 @@ ends one. Output goes into the Terminal window.
 * The apps (Terminal, Files, Notes, Settings) and the compositor are still
   kernel code. The roadmap's "desktop as a user-space service" is **not
   done**, because it needs IPC and shared surfaces.
-* There is one CPU (no SMP). The timer is the PIT; the LAPIC timer and
-  IOAPIC are not used.
+* System calls run under the big kernel lock (0.5), so they are serialized
+  across CPUs; user-mode code runs in parallel.
 * `syscall`/`sysret` is not used. `int 0x80` is simpler to make safe and is
   fast enough here.

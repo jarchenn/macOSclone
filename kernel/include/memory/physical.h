@@ -29,6 +29,9 @@ void pmm_core_init(struct pmm *p, const struct boot_mem_region *r, size_t n,
 phys_addr_t pmm_core_alloc(struct pmm *p);
 phys_addr_t pmm_core_alloc_contig(struct pmm *p, size_t pages);
 int pmm_core_free(struct pmm *p, phys_addr_t addr);
+/* Takes the lowest free page in [lo, hi), or returns 0. */
+phys_addr_t pmm_core_claim_below(struct pmm *p, phys_addr_t lo, phys_addr_t hi);
+extern phys_addr_t g_low_page; /* page below 1 MiB reserved at boot (0 = none) */
 /* Makes every page of regions with the given type available. */
 uint64_t pmm_core_release_type(struct pmm *p, const struct boot_mem_region *r, size_t n, uint32_t type);
 bool pmm_core_is_used(const struct pmm *p, phys_addr_t addr);
