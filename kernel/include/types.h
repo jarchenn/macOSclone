@@ -25,4 +25,6 @@ typedef uint64_t virt_addr_t;
 
 #define compiler_barrier() __asm__ volatile("" ::: "memory")
 
+#include "kerr.h"
+
 #endif

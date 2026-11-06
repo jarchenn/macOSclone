@@ -20,6 +20,13 @@ static uint32_t generation;
 static struct pfs pfs;
 static bool persistent;
 static int last_commit_error;
+static struct vfs_node *tmp;
+static uint32_t next_ino = 1;
+static int64_t (*clock_fn)(void);
+static const struct vfs_cred default_file = { 0, 0, 0644 }, default_dir = { 0, 0, 0755 };
+
+void vfs_set_clock(int64_t (*now)(void)) { clock_fn = now; }
+static int64_t now_s(void) { return clock_fn ? clock_fn() : 0; }
 
 uint32_t vfs_generation(void) { return generation; }
 
@@ -96,6 +103,10 @@ static int collect(struct vfs_node *dir, const char *prefix, struct pfs_entry *e
         else
             str_copy(x->path, c->name, sizeof x->path);
         x->type = c->type;
+        x->mode = c->mode;
+        x->uid = c->uid;
+        x->gid = c->gid;
+        x->mtime = c->mtime;
         if (c->type == VFS_FILE) {
             x->size = c->size;
             x->data = c->data;
@@ -195,6 +206,7 @@ const char *vfs_strerror(int err)
     case VFS_EBUSY: return "file is in use";
     case VFS_ENOTEMPTY: return "directory not empty";
     case VFS_EIO: return "disk I/O error";
+    case VFS_EXDEV: return "cannot move between file systems";
     default: return "unknown error";
     }
 }
@@ -207,6 +219,9 @@ struct vfs_node *vfs_node_new(const char *name, uint8_t type, const struct fs_ba
     str_copy(n->name, name, sizeof n->name);
     n->type = type;
     n->fs = fs;
+    n->mode = type == VFS_DIR ? 0755 : 0644;
+    n->ino = next_ino++;
+    n->mtime = now_s();
     return n;
 }
 
@@ -245,8 +260,13 @@ void vfs_init(void)
     ramfs_reset_usage();
     root = vfs_node_new("", VFS_DIR, &initramfs_backend);
     home = vfs_node_new("home", VFS_DIR, &ramfs_backend);
+    tmp = vfs_node_new("tmp", VFS_DIR, &ramfs_backend);
     if (root && home)
         vfs_node_attach(root, home);
+    if (root && tmp) {
+        tmp->mode = 01777; /* world-writable, sticky */
+        vfs_node_attach(root, tmp);
+    }
     generation++;
 }
 
@@ -295,7 +315,7 @@ static int resolve(const char *path, struct vfs_node **out, char *norm_out)
 }
 
 /* Creates the final component of `path` with the given type. */
-static int create_node(const char *path, uint8_t type, struct vfs_node **out)
+static int create_node_as(const char *path, uint8_t type, struct vfs_node **out, const struct vfs_cred *c)
 {
     char norm[VFS_PATH_MAX + 1], parent[VFS_PATH_MAX + 1], name[VFS_NAME_MAX + 1];
     int r = vfs_normalize("/", path, norm, sizeof norm);
@@ -313,18 +333,33 @@ static int create_node(const char *path, uint8_t type, struct vfs_node **out)
         return r;
     if (dir->type != VFS_DIR)
         return VFS_ENOTDIR;
+    if (dir->fs->readonly)
+        return VFS_EROFS;
     r = dir->fs->create(dir, name, type, out);
-    if (r == VFS_OK)
+    if (r == VFS_OK) {
+        (*out)->mode = c->mode & 07777;
+        (*out)->uid = c->uid;
+        (*out)->gid = c->gid;
+        (*out)->mtime = now_s();
+        dir->mtime = (*out)->mtime;
         generation++;
+    }
     return r;
 }
 
-int vfs_mkdir(const char *path)
+static int create_node(const char *path, uint8_t type, struct vfs_node **out)
+{
+    return create_node_as(path, type, out, type == VFS_DIR ? &default_dir : &default_file);
+}
+
+int vfs_mkdir_as(const char *path, const struct vfs_cred *c)
 {
     struct vfs_node *n;
-    int r = create_node(path, VFS_DIR, &n);
+    int r = create_node_as(path, VFS_DIR, &n, c);
     return r ? r : persist(n);
 }
+
+int vfs_mkdir(const char *path) { return vfs_mkdir_as(path, &default_dir); }
 
 int vfs_create(const char *path)
 {
@@ -333,15 +368,52 @@ int vfs_create(const char *path)
     return r ? r : persist(n);
 }
 
+static void fill_stat(const struct vfs_node *n, struct vfs_stat *st)
+{
+    st->type = n->type;
+    st->readonly = n->fs->readonly;
+    st->size = n->type == VFS_FILE ? n->size : 0;
+    st->mode = n->mode;
+    st->uid = n->uid;
+    st->gid = n->gid;
+    st->ino = n->ino;
+    st->mtime = n->mtime;
+}
+
+int vfs_chmod(const char *path, uint16_t mode)
+{
+    struct vfs_node *n;
+    int r = resolve(path, &n, NULL);
+    if (r)
+        return r;
+    if (n->fs->readonly)
+        return VFS_EROFS;
+    n->mode = mode & 07777;
+    generation++;
+    return persist(n);
+}
+
+int vfs_chown(const char *path, uint32_t uid, uint32_t gid)
+{
+    struct vfs_node *n;
+    int r = resolve(path, &n, NULL);
+    if (r)
+        return r;
+    if (n->fs->readonly)
+        return VFS_EROFS;
+    n->uid = uid;
+    n->gid = gid;
+    generation++;
+    return persist(n);
+}
+
 int vfs_stat(const char *path, struct vfs_stat *st)
 {
     struct vfs_node *n;
     int r = resolve(path, &n, NULL);
     if (r)
         return r;
-    st->type = n->type;
-    st->readonly = n->fs->readonly;
-    st->size = n->type == VFS_FILE ? n->size : 0;
+    fill_stat(n, st);
     return VFS_OK;
 }
 
@@ -362,10 +434,13 @@ int vfs_readdir(const char *path, uint32_t index, struct vfs_dirent *out)
     out->type = c->type;
     out->readonly = c->fs->readonly;
     out->size = c->type == VFS_FILE ? c->size : 0;
+    out->ino = c->ino;
     return VFS_OK;
 }
 
-int vfs_open(const char *path, unsigned flags)
+int vfs_open(const char *path, unsigned flags) { return vfs_open_as(path, flags, &default_file); }
+
+int vfs_open_as(const char *path, unsigned flags, const struct vfs_cred *c)
 {
     if (!(flags & (VFS_O_READ | VFS_O_WRITE)))
         return VFS_EINVAL;
@@ -381,8 +456,10 @@ int vfs_open(const char *path, unsigned flags)
     bool created = false;
     int r = resolve(path, &n, NULL);
     if (r == VFS_ENOENT && (flags & VFS_O_CREATE)) {
-        r = create_node(path, VFS_FILE, &n);
+        r = create_node_as(path, VFS_FILE, &n, c);
         created = r == VFS_OK;
+    } else if (r == VFS_OK && (flags & VFS_O_CREATE) && (flags & VFS_O_EXCL)) {
+        return VFS_EEXIST;
     }
     if (r)
         return r;
@@ -445,6 +522,9 @@ int vfs_write(int fd, const void *buf, size_t n)
         return VFS_EBADF;
     if (n > RAMFS_MAX_FILE)
         return VFS_EFBIG;
+    if (f->flags & VFS_O_APPEND)
+        f->offset = f->node->size;
+    f->node->mtime = now_s();
     int r = f->node->fs->write(f->node, f->offset, buf, (uint32_t)n);
     if (r)
         return r;
@@ -461,6 +541,35 @@ int vfs_seek(int fd, uint32_t offset)
         return VFS_EBADF;
     f->offset = offset;
     return VFS_OK;
+}
+
+int vfs_tell(int fd)
+{
+    struct open_file *f = get_fd(fd);
+    return f ? (int)f->offset : VFS_EBADF;
+}
+
+int vfs_fstat(int fd, struct vfs_stat *st)
+{
+    struct open_file *f = get_fd(fd);
+    if (!f)
+        return VFS_EBADF;
+    fill_stat(f->node, st);
+    return VFS_OK;
+}
+
+int vfs_ftruncate(int fd, uint32_t size)
+{
+    struct open_file *f = get_fd(fd);
+    if (!f || !(f->flags & VFS_O_WRITE))
+        return VFS_EBADF;
+    int r = f->node->fs->truncate(f->node, size);
+    if (r == VFS_OK) {
+        f->node->mtime = now_s();
+        f->wrote = true;
+        generation++;
+    }
+    return r;
 }
 
 int vfs_truncate(const char *path, uint32_t size)
@@ -490,6 +599,15 @@ static void detach(struct vfs_node *n)
     n->parent = NULL;
 }
 
+/* The mount a node belongs to: /home, /tmp or the root (initramfs). */
+static const struct vfs_node *mount_of(const struct vfs_node *n)
+{
+    for (; n; n = n->parent)
+        if (n == home || n == tmp)
+            return n;
+    return root;
+}
+
 static bool node_open(const struct vfs_node *n)
 {
     for (int i = 0; i < VFS_MAX_OPEN; i++)
@@ -504,7 +622,7 @@ int vfs_remove(const char *path)
     int r = resolve(path, &n, NULL);
     if (r)
         return r;
-    if (n == root || n == home || !n->parent)
+    if (n == root || n == home || n == tmp || !n->parent)
         return VFS_EINVAL; /* mount points cannot be removed */
     if (n->fs->readonly)
         return VFS_EROFS;
@@ -531,15 +649,33 @@ int vfs_rename(const char *from, const char *to)
     int r = resolve(from, &n, NULL);
     if (r)
         return r;
-    if (n == root || n == home || !n->parent)
+    if (n == root || n == home || n == tmp || !n->parent)
         return VFS_EINVAL;
     if (n->fs->readonly)
         return VFS_EROFS;
     r = vfs_normalize("/", to, nto, sizeof nto);
     if (r)
         return r;
-    if (lookup(nto, &existing) == VFS_OK)
-        return existing == n ? VFS_OK : VFS_EEXIST;
+    /* POSIX rename replaces an existing target of the same kind. The removal
+     * and the move are committed together, so the rename is atomic on disk. */
+    struct vfs_node *victim = NULL;
+    if (lookup(nto, &existing) == VFS_OK) {
+        if (existing == n)
+            return VFS_OK;
+        if (existing->type == VFS_DIR && n->type != VFS_DIR)
+            return VFS_EISDIR;
+        if (existing->type != VFS_DIR && n->type == VFS_DIR)
+            return VFS_ENOTDIR;
+        if (existing->type == VFS_DIR && existing->children)
+            return VFS_ENOTEMPTY;
+        if (existing->fs != n->fs || mount_of(existing) != mount_of(n))
+            return VFS_EXDEV;
+        if (node_open(existing))
+            return VFS_EBUSY;
+        if (existing == home || existing == tmp || existing == root)
+            return VFS_EINVAL;
+        victim = existing;
+    }
     r = vfs_split(nto, parent, sizeof parent, name, sizeof name);
     if (r)
         return r;
@@ -548,12 +684,23 @@ int vfs_rename(const char *from, const char *to)
         return r;
     if (dir->type != VFS_DIR)
         return VFS_ENOTDIR;
-    if (dir->fs != n->fs)
-        return VFS_EROFS; /* cross-filesystem moves are not supported */
+    if (dir->fs->readonly)
+        return VFS_EROFS;
+    if (dir->fs != n->fs || mount_of(dir) != mount_of(n))
+        return VFS_EXDEV; /* cross-filesystem moves are not supported */
     /* A directory cannot be moved inside itself. */
     for (struct vfs_node *a = dir; a; a = a->parent)
         if (a == n)
             return VFS_EINVAL;
+    if (victim) {
+        r = victim->fs->remove ? victim->fs->remove(victim) : VFS_EROFS;
+        if (r)
+            return r;
+        detach(victim);
+        if (victim->capacity && victim->data)
+            kfree(victim->data);
+        kfree(victim);
+    }
     detach(n);
     str_copy(n->name, name, sizeof n->name);
     vfs_node_attach(dir, n);
@@ -654,6 +801,10 @@ static int load_entry(void *ctx, uint32_t type, const char *path, const uint8_t 
     struct vfs_node *n = vfs_node_new(name, (uint8_t)type, &initramfs_backend);
     if (!n)
         return VFS_ENOMEM;
+    /* The archive carries no modes: programs are executable, the rest is
+     * read-only data owned by root. */
+    if (type == VFS_FILE && (str_starts_with(path, "system/bin/") || str_starts_with(path, "system/lib/")))
+        n->mode = 0755;
     if (type == VFS_FILE) {
         if (len > UINT32_MAX)
             return VFS_EBADARCHIVE;
@@ -681,6 +832,10 @@ static int emit_entry(void *ctx, const struct pfs_entry *e, const uint8_t *data)
     if (ramfs_backend.create(dir, name, e->type, &n))
         return -1;
     n->fs = &pfs_backend;
+    n->mode = e->mode;
+    n->uid = e->uid;
+    n->gid = e->gid;
+    n->mtime = e->mtime;
     if (e->type == VFS_FILE) {
         if (ramfs_backend.replace(n, data, e->size)) {
             /* Out of RAM quota: drop the node rather than ever committing an

@@ -85,6 +85,7 @@ static inline uint64_t rdtsc(void)
 
 #define MSR_APIC_BASE 0x1B
 #define MSR_EFER 0xC0000080
+#define MSR_FS_BASE 0xC0000100
 #define MSR_PAT 0x277
 
 #endif

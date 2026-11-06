@@ -33,6 +33,7 @@ int sock_bind(int s, uint16_t port);
 long sock_sendto(int s, const void *buf, uint64_t len, uint32_t ip, uint16_t port);
 long sock_recvfrom(int s, void *buf, uint64_t len, uint32_t *ip, uint16_t *port, uint64_t timeout_ms);
 int sock_close(int s);
+int sock_poll(int s); /* bit 0 readable, 1 writable, 2 hung up/error */
 int sock_count(void);
 const char *net_strerror(int err);
 

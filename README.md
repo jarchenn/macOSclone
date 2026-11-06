@@ -89,10 +89,11 @@ In QEMU's default GTK window, click inside it to give the guest the mouse.
 * **Terminal**: built-in commands (`help` lists them all), including
   `ls`, `cat`, `echo`, `write`, `mkdir`, `rm`, `mv`, `sync`, `df`, `ps`,
   `kill`, `ifconfig`, `netstat`, `reboot` and `poweroff`. Any program in
-  `/system/bin` runs as an isolated user process, for example `hello`, `sh`,
-  `ping 10.0.2.2`, `nslookup example.com` or
-  `fetch http://example.com/`. Add `&` to run it in the background. It is not
-  a POSIX shell: there are no pipes or redirection.
+  `/system/bin` runs as an isolated user process on the Terminal's
+  pseudo-terminal, for example `sh`, `lua`, `grep -n main file.c`,
+  `ping 10.0.2.2`, `nslookup example.com` or `fetch http://example.com/`.
+  Lines with shell syntax go to `sh`, so `cat notes.txt | grep todo | wc -l >
+  count.txt` works directly. Add `&` to run a program in the background.
 * **Files**: browses `/home`, `/home/notes`, `/system` and `/`. Double-click
   or Enter opens a folder or a text file (in Notes); Backspace goes up.
 * **Notes**: plain-text editor (16 KiB per note) that saves to
@@ -104,15 +105,18 @@ With the data disk attached (the default for `make run`), **files in
 stored in memory and reset when Aurora restarts. The apps say which mode is
 active. `/system` is read-only.
 
-## What 0.5 is, and is not
+## What 0.6 is, and is not
 
 * User programs run in ring 3 with their own address spaces and are
   preemptively scheduled. A crashing program is killed and nothing else is
   affected. **The desktop and its four apps are still part of the kernel**,
   so a bug in them can still stop the system.
-* Programs are written in C against Aurora's own small ABI and libc. There is
-  no compiler inside Aurora, no POSIX, no `fork`/`exec`/pipes, and **no
-  floating point in user programs**.
+* Programs are portable C compiled on the host (`tools/aurora_cc.py`)
+  against newlib and Aurora's POSIX layer: `fork`/`exec`/`posix_spawn`,
+  pthreads, pipes, signals, `mmap`, permissions, a pty-based terminal, a
+  shell with pipelines, small utilities and Lua 5.4. Linking is static;
+  there is no compiler inside Aurora, no shared memory, no job control and
+  no Linux binary compatibility.
 * Networking covers IPv4, ICMP, UDP, DHCP, DNS and a TCP client (no
   server sockets, no congestion control, **no TLS**: `https://` is refused).
 * SMP: user programs run in parallel on all CPUs, but most kernel code
@@ -142,9 +146,10 @@ See [STATUS.md](STATUS.md) for the acceptance matrix with evidence and
 | `make network` | networking tests against servers started on the host |
 | `make smp` | boots at 1/2/4/8 CPUs, per-CPU work, TLB shootdown, ACPI power button, 2-minute 8-CPU stress |
 | `make stress` | the 30-minute 8-CPU stress run (0.5 acceptance) |
+| `make posix` | 0.6 acceptance: pipelines, Ctrl+C, fork x1000, signals, permissions, Lua test suite |
 | `make soak` | 4-minute random input and idle soak |
 | `make check` | ELF/image consistency checks (non-PIE, higher half, W^X segments, Limine markers, no undefined symbols) |
-| `make dist` | `build/dist/aurora-os-0.5.0.zip` with source, image, kernel and docs |
+| `make dist` | `build/dist/aurora-os-0.6.0.zip` with source, image, kernel and docs |
 | `make clean` | removes `build/` only |
 
 Build variants: `release`, `test` (adds `@@` serial markers used by the

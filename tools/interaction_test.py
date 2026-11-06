@@ -611,12 +611,13 @@ def s_user_programs(d):
     d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=badptr status=0", timeout=10)
     since = d.g.mark()
     d.terminal("crash")
-    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=crash status=142 reason=segmentation fault: write unmapped at 0 ", timeout=10, since=since)
-    for mode, pat in (("kernel", r"read denied at ffffffff80000000"), ("stack", r"write unmapped at 7fff"),
-                      ("ud", r"invalid opcode"), ("gp", r"general protection fault")):
+    # 0.6: a fault is a signal; the wait status is the signal number.
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=crash status=11 reason=segmentation fault: write unmapped at 0 ", timeout=10, since=since)
+    for mode, sig, pat in (("kernel", 11, r"read denied at ffffffff80000000"), ("stack", 11, r"write unmapped at 7fff"),
+                           ("ud", 4, r"invalid opcode"), ("gp", 11, r"general protection fault")):
         since = d.g.mark()
         d.terminal(f"crash {mode}")
-        d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=crash status=1\d\d reason=.*" + pat, timeout=10, since=since)
+        d.g.wait_for(rf"@@PROC_EXIT pid=\d+ name=crash status={sig} reason=.*" + pat, timeout=10, since=since)
     # the kernel and desktop are still fine
     d.terminal("uptime", r"@@TERM up \d+:\d\d:\d\d")
     d.terminal("ls /system/bin", r"@@TERM spin ")
@@ -634,9 +635,9 @@ def s_memory_isolation(d):
         raise GuestError(f"isolation broken: reader saw {m2.group(2)!r} at {m2.group(3)} (writer {addr})")
     since = d.g.mark()
     d.terminal("memtest peek ffffffff80000000")
-    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=memtest status=142 reason=segmentation fault: read denied at ffffffff80000000", timeout=10, since=since)
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=memtest status=11 reason=segmentation fault: read denied at ffffffff80000000", timeout=10, since=since)
     d.terminal("memtest peek ffff800000100000")
-    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=memtest status=142 reason=segmentation fault: read denied at ffff800000100000", timeout=10, since=since)
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=memtest status=11 reason=segmentation fault: read denied at ffff800000100000", timeout=10, since=since)
     d.g.wait_for(rf"@@TERM memtest: pid {writer} still sees SECRET-42", timeout=15, since=since)
     d.g.wait_for(rf"@@PROC_EXIT pid={writer} name=memtest status=0", timeout=10, since=since)
     return f"same VA {addr}: writer kept SECRET-42, reader saw its own 'untouched'; kernel/HHDM reads faulted"
@@ -656,13 +657,18 @@ def s_concurrency(d):
     d.dock_click("Files")
     d.wait_focus("Files", s2)
     term_focus(d)
-    d.terminal("ps", rf"@@TERM +{spin} +running")
-    m = re.findall(rf"@@TERM +{spin} +running +(\d+)", d.g.serial())
-    cpu = int(m[-1])
+    ps_row = rf"@@TERM +{spin} +\d+ +\d+ +\d+ running +(\d+)"
+    d.terminal("ps", ps_row)
+    cpu = int(re.findall(ps_row, d.g.serial())[-1])
     since = d.g.mark()
     d.terminal(f"kill {spin}")
-    d.g.wait_for(rf"@@PROC_EXIT pid={spin} name=spin status=-1 reason=killed", timeout=10, since=since)
-    d.terminal("ps", r"@@TERM +\(no user processes\)")
+    d.g.wait_for(rf"@@PROC_EXIT pid={spin} name=spin status=9 reason=killed by SIGKILL", timeout=10, since=since)
+    since = d.g.mark()
+    d.terminal("ps", r"@@TERM context switches:")
+    if re.search(rf"@@TERM +{spin} ", d.g.serial()[since:]):
+        raise GuestError("spin still listed after kill")
+    if not re.search(r"@@TERM +1 +0 +0 +1 running .* init", d.g.serial()[since:]):
+        raise GuestError("init (pid 1) missing from ps")
     since = d.g.mark()
     d.dock_click("Files")
     d.wait_focus("Files", since)
@@ -678,37 +684,55 @@ def s_crash_does_not_stop_others(d):
     d.terminal("counter 8 250 C &")
     d.g.wait_for(r"@@TERM C 2\s*$", timeout=10, since=since)
     d.terminal("crash")
-    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=crash status=142", timeout=10, since=since)
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=crash status=11", timeout=10, since=since)
     d.g.wait_for(r"@@TERM C 8\s*$", timeout=15, since=since)
     d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=counter status=0", timeout=10, since=since)
     return "counter kept running through another process's crash and exited 0"
 
 
 def s_stdin_and_shell(d):
+    """0.6: programs run on the Terminal's pty. The line discipline echoes
+    and edits input (Backspace), Ctrl+D is end-of-file, and Ctrl+C sends
+    SIGINT to the foreground process group: it kills a program running
+    under the shell while the shell survives."""
     term_focus(d)
     since = d.g.mark()
     d.terminal("upper", r"@@TERM upper: type lines")
-    d.g.type_text("mixed Case 123\n")
+    d.g.type_text("mixed Casx")
+    d.g.key("backspace")
+    d.g.type_text("e 123\n")
     d.g.wait_for(r"@@TERM MIXED CASE 123\s*$", timeout=10, since=since)
     d.g.key("ctrl", "d")
     d.g.wait_for(r"@@TERM upper: 1 lines", timeout=10, since=since)
     since = d.g.mark()
-    d.terminal("sh", r"@@TERM Aurora user shell")
+    d.terminal("sh", r"@@TERM Aurora sh \(pid \d+\)")
+    time.sleep(0.5)  # the prompt is an unterminated line: no TERM marker
     d.g.type_text("hello nested\n")
     d.g.wait_for(r"@@TERM Hello from user space! pid=\d+ argc=2 \[nested\]", timeout=10, since=since)
-    d.g.wait_for(r"ush: hello exited with status 0", timeout=10, since=since)
-    d.g.type_text("cat /system/welcome.txt\n")
-    d.g.wait_for(r"@@TERM Aurora is a small desktop operating system", timeout=10, since=since)
+    d.g.type_text("cat /system/welcome.txt | grep -c Aurora\n")
+    d.g.wait_for(r"@@TERM [1-9]\d*\s*$", timeout=10, since=since)
+    # Ctrl+C kills the foreground program; the shell survives.
+    since = d.g.mark()
+    d.g.type_text("spin\n")
+    d.g.wait_for(r"@@PROC_EXEC pid=\d+ name=spin", timeout=10, since=since)
+    time.sleep(1.0)
+    d.g.key("ctrl", "c")
+    d.g.wait_for(r"@@PTY_SIGNAL pty=\d+ sig=2", timeout=10, since=since)
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=spin status=2 reason=killed by SIGINT", timeout=10, since=since)
+    since = d.g.mark()
+    d.g.type_text("echo still-here\n")
+    d.g.wait_for(r"@@TERM still-here\s*$", timeout=10, since=since)
     d.g.type_text("exit\n")
     d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=sh status=0", timeout=10, since=since)
-    # Ctrl+C stops a foreground program
+    # Ctrl+C on a program started directly by the Terminal
     since = d.g.mark()
     d.terminal("spin")
     d.g.wait_for(r"@@PROC_START pid=\d+ name=spin", timeout=10, since=since)
     time.sleep(1.0)
     d.g.key("ctrl", "c")
-    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=spin status=-1 reason=killed", timeout=10, since=since)
-    return "stdin line + EOF reached the program; user shell spawned/waited; Ctrl+C killed a foreground hog"
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=spin status=2 reason=killed by SIGINT", timeout=10, since=since)
+    return ("pty echo + Backspace + Ctrl+D reached upper; sh ran a pipeline; Ctrl+C killed spin under sh "
+            "(SIGINT to the foreground group) and the shell kept working")
 
 
 def s_process_leaks(d):

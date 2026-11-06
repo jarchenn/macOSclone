@@ -1,6 +1,13 @@
 /* nslookup <name> [server[:port]]: DNS A lookup through the kernel
  * resolver, using the DHCP-provided server or the one given. */
-#include "aurora.h"
+#include <errno.h>
+#include <fcntl.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <aurora.h>
 
 int main(int argc, char **argv)
 {
@@ -18,18 +25,18 @@ int main(int argc, char **argv)
             *colon = 0;
             port = (uint16_t)atol(colon + 1);
         }
-        if (!parse_ipv4(host, &server)) {
+        if (!aurora_parse_ipv4(host, &server)) {
             printf("nslookup: bad server address %s\n", host);
             return 2;
         }
     }
-    int r = server ? resolve_via(argv[1], &ip, 4000, server, port) : resolve(argv[1], &ip, 4000);
+    int r = server ? aurora_resolve_via(argv[1], &ip, 4000, server, port) : aurora_resolve(argv[1], &ip, 4000);
     if (r) {
-        printf("nslookup: %s: %s\n", argv[1], strerror(r));
+        printf("nslookup: %s: %s\n", argv[1], errno == ENOENT ? "name not found" : strerror(errno));
         return 1;
     }
     char s[16];
-    format_ipv4(ip, s, sizeof s);
+    aurora_format_ipv4(ip, s, sizeof s);
     printf("%s has address %s\n", argv[1], s);
     return 0;
 }

@@ -54,6 +54,18 @@ static uint16_t next_port = 50000;
 
 const char *tcp_state_name(const struct tcb *t) { return state_names[t->state]; }
 
+int tcp_poll(const struct tcb *t)
+{
+    int r = 0;
+    if (t->rlen || t->rx_fin || t->state == T_CLOSED || t->state == T_CLOSE_WAIT || t->err)
+        r |= 1; /* a read would not block (data, EOF or error) */
+    if ((t->state == T_ESTABLISHED || t->state == T_CLOSE_WAIT) && t->slen < TCP_BUF)
+        r |= 2;
+    if (t->state == T_CLOSED || t->err)
+        r |= 4;
+    return r;
+}
+
 int tcp_active_count(void)
 {
     int n = 0;

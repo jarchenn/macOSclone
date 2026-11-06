@@ -33,6 +33,8 @@ struct elf_segment {
 
 struct elf_image {
     uint64_t entry;
+    uint64_t phoff;    /* program header table (copied to the user stack for AT_PHDR) */
+    uint16_t phnum;
     int nseg;
     struct elf_segment seg[ELF_MAX_SEGMENTS];
 };

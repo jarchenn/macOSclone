@@ -19,6 +19,15 @@ void bkl_sched_out(struct task *prev);
 void bkl_sched_in(struct task *t);
 
 static struct task tasks[MAX_TASKS];
+
+void fpu_init_state(uint8_t *area)
+{
+    memset(area, 0, 512);
+    area[0] = 0x7F; /* FCW 0x037F: all x87 exceptions masked, 64-bit precision */
+    area[1] = 0x03;
+    area[24] = 0x80; /* MXCSR 0x1F80: all SSE exceptions masked, round to nearest */
+    area[25] = 0x1F;
+}
 static struct task *desktop_task;
 static DEFINE_SPINLOCK(sched_lock, "sched");
 static int rr_cursor;   /* round-robin position in tasks[] */
@@ -107,6 +116,8 @@ struct task *task_create(const char *name, void (*entry)(void *), void *arg, str
     t->proc = proc;
     t->entry = entry;
     t->arg = arg;
+    if (proc)
+        fpu_init_state(t->fpu);
     /* Initial frame consumed by context_switch: rflags, r15..r12, rbx, rbp,
      * then the return address. RSP after `ret` is 16-byte aligned. */
     uint64_t *sp = (uint64_t *)t->stack_top;
@@ -257,6 +268,12 @@ static void switch_to(struct cpu *c, struct task *prev, struct task *next)
     if (read_cr3() != space)
         write_cr3(space);
     gdt_set_kernel_stack(next->stack_top);
+    if (prev->proc)
+        fpu_save(prev->fpu);
+    if (next->proc) {
+        fpu_restore(next->fpu);
+        wrmsr(MSR_FS_BASE, next->fs_base);
+    }
     bkl_sched_out(prev);
     context_switch(&prev->rsp, next->rsp);
     /* Resumes here when `prev` runs again, possibly on another CPU; the CPU
@@ -329,7 +346,7 @@ void sched_sleep_ms(uint64_t ms)
         if (now >= end)
             return;
         sched_block(end - now);
-        if (CURRENT->proc && process_kill_pending(CURRENT->proc))
+        if (CURRENT->proc && task_interrupted(CURRENT))
             return;
     }
 }
@@ -376,6 +393,33 @@ void sched_wake_all(const void *obj)
     spin_unlock_irqrestore(&sched_lock, f);
 }
 
+int sched_wake_n(const void *obj, int n)
+{
+    int woke = 0;
+    uint64_t f = spin_lock_irqsave(&sched_lock);
+    for (int i = 0; i < MAX_TASKS && woke < n; i++)
+        if (tasks[i].wait_obj == obj && tasks[i].state == TASK_BLOCKED) {
+            wake_locked(&tasks[i]);
+            woke++;
+        }
+    spin_unlock_irqrestore(&sched_lock, f);
+    return woke;
+}
+
+void sched_kick(struct task *t)
+{
+    uint64_t f = spin_lock_irqsave(&sched_lock);
+    int cpu = t->on_cpu;
+    struct cpu *self = this_cpu();
+    if (cpu >= 0 && (uint32_t)cpu < g_ncpus && &g_cpus[cpu] != self && g_cpus[cpu].online) {
+        g_cpus[cpu].ipis++;
+        lapic_send_ipi(g_cpus[cpu].apic_id, IPI_RESCHED_VECTOR);
+    } else if (cpu >= 0 && &g_cpus[cpu] == self) {
+        self->need_resched = true;
+    }
+    spin_unlock_irqrestore(&sched_lock, f);
+}
+
 void sched_tick(void)
 {
     struct cpu *c = this_cpu();
@@ -396,6 +440,21 @@ void sched_tick(void)
         uint64_t now = time_ms();
         for (int i = 0; i < MAX_TASKS; i++) {
             struct task *t = &tasks[i];
+            struct process *ap = t->proc;
+            if (ap && ap->alarm_ms && now >= ap->alarm_ms && ap->nthreads && ap->threads[0] == t) {
+                /* SIGALRM: set the pending bit and wake the main thread. */
+                ap->alarm_ms = 0;
+                __atomic_or_fetch(&ap->sigpending, 1ull << (AURORA_SIGALRM - 1), __ATOMIC_SEQ_CST);
+                if (t->state == TASK_BLOCKED) {
+                    t->state = TASK_RUNNABLE;
+                    t->wake_ms = 0;
+                    woke_any = true;
+                    if (t->on_cpu < 0)
+                        kick_idle_cpu();
+                } else if (t->on_cpu >= 0 && (uint32_t)t->on_cpu != c->index) {
+                    lapic_send_ipi(g_cpus[t->on_cpu].apic_id, IPI_RESCHED_VECTOR);
+                }
+            }
             if (t->state == TASK_BLOCKED && t->wake_ms && now >= t->wake_ms) {
                 t->state = TASK_RUNNABLE;
                 t->timed_out = true;

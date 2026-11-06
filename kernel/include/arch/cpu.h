@@ -47,6 +47,7 @@ struct cpu_features {
 };
 extern struct cpu_features g_cpu;
 void cpu_detect(void);
+void cpu_enable_sse(void); /* FXSAVE/SSE for user code */
 
 /* Switches to a new stack and calls fn(); never returns. (entry.S) */
 NORETURN void switch_stack_and_call(uint64_t stack_top, void (*fn)(void));

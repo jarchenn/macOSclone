@@ -16,6 +16,7 @@
 #include "memory/heap.h"
 #include "fs/vfs.h"
 #include "core/sched.h"
+#include "core/process.h"
 #include "core/spinlock.h"
 #include "net/net.h"
 #include "drivers/pci.h"
@@ -102,6 +103,7 @@ void kmain_early(void)
     }
 
     cpu_detect();
+    cpu_enable_sse();
     klog("cpu: %s nx=%d pat=%d apic=%d x2apic=%d", g_cpu.vendor, g_cpu.nx, g_cpu.pat, g_cpu.apic, g_cpu.x2apic);
     gdt_init();
     idt_init();
@@ -158,6 +160,7 @@ static NORETURN void kmain_stage2(void)
     *(volatile uint32_t *)0 = 0xDEAD;
 #endif
 
+    process_init_clock();
     vfs_init();
     const struct boot_module *initrd = NULL;
     for (size_t i = 0; i < g_boot.module_count; i++)
@@ -189,6 +192,7 @@ static NORETURN void kmain_stage2(void)
         vfs_mkdir("/home/notes");
     klog("AURORA_MILESTONE vfs");
     net_init();
+    process_start_init();
 
     klog("AURORA_BOOT_OK");
     desktop_main();

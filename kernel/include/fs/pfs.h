@@ -51,6 +51,10 @@ struct pfs_entry {
     bool dirty;                  /* content changed since the last commit */
     uint32_t start, nblocks;     /* extent; updated by pfs_commit */
     uint32_t crc;
+    /* Metadata (format v2; v1 catalogs load with mode 0644/0755, owner 0). */
+    uint16_t mode;
+    uint32_t uid, gid;
+    int64_t mtime;
 };
 
 struct pfs_stats {

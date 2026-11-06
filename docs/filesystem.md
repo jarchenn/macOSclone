@@ -98,7 +98,13 @@ and also keeps its own buffer, so a failed save never loses edits.
 
 `vfs_remove` deletes a file or an empty directory (`ENOTEMPTY` otherwise;
 `EBUSY` if the file is open). `vfs_rename` moves a file or directory within
-one filesystem (an existing target returns `EEXIST`; cross-filesystem moves return `EROFS`). `vfs_sync`
+one filesystem. Since 0.6 it follows POSIX: an existing file (or empty
+directory) at the target is replaced, and the removal and the move are one
+PFS commit, so the rename is atomic on disk; file over directory is
+`EISDIR`, directory over file `ENOTDIR`, an open target `EBUSY`, and moves
+between `/home`, `/tmp` and `/` are `EXDEV`. Every node also has a mode, owner,
+group and mtime (0.6, persisted in the PFS catalog; see
+[userland.md](userland.md) for the permission checks). `vfs_sync`
 forces a flush. Terminal exposes these as `rm`, `mv` and `sync`.
 
 ## Errors

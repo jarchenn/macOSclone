@@ -45,3 +45,27 @@ toolchain. Tests use QEMU's `virtio-blk-pci` and `virtio-net-pci` devices and
 user-mode networking (slirp), all part of the QEMU build listed above. The
 host-side test servers in `tools/network_test.py` use only the Python
 standard library.
+
+## Since 0.6: user-space libraries and ports
+
+These are compiled into the user programs in `/system/bin` (not into the
+kernel). Their license texts are installed in the image under
+`/system/licenses/`.
+
+| Component | Version | Source | Integrity | License | Used for |
+|---|---|---|---|---|---|
+| newlib (libc + libm) | **4.6.0.20260123** | https://sourceware.org/pub/newlib/newlib-4.6.0.20260123.tar.gz | SHA-512 `ffa16d6465c0b429264c46395fa760fbcf072d3ff86e87330ba1f483efcfe66393ef83b03932759444a0ebeaef94d3ca58a59e91ab7b97b2a6ac6be2e7589657` (as published in sourceware's `sha512.sum`; checked by `tools/fetch_deps.py`) | BSD-style, per file (`COPYING.NEWLIB`, installed as `/system/licenses/newlib-COPYING.NEWLIB`) | the C library of every user program: stdio, stdlib, string, time, regex, glob, getopt, libm |
+| Lua | **5.4.9** | https://www.lua.org/ftp/lua-5.4.9.tar.gz | SHA-256 `2335b6c582a52654f94612bf10d2f4672805d05329aa6568b1d8cd9e5c6fb8e6` (as listed on lua.org/ftp) | MIT (`/system/licenses/lua-LICENSE.txt`) | `/system/bin/lua`, the 0.6 "ported interpreter" |
+| Lua test suite | **5.4.9** | https://www.lua.org/tests/lua-5.4.9-tests.tar.gz | SHA-256 `7d971845f545ffc09fbb3128a86b2c6524161c70d0fdf0154a16e8c00c343fca` (as listed on lua.org/tests) | MIT | `/system/share/lua-tests`, run by `make posix` |
+
+The archives are only unpacked (symbolic links and paths outside the
+archive's top directory are rejected). Their build systems are not run:
+`tools/userland.py` compiles newlib from the file lists in its
+`Makefile.inc` fragments and Lua from `src/*.c` (without `luac.c`). The
+deviations from upstream are build-time edits of installed newlib headers,
+listed in `HEADER_PATCHES` / `HEADER_REPLACEMENTS` in `tools/userland.py`;
+no newlib or Lua source file is modified.
+
+Aurora's own code linked into user programs: the libc OS layer
+(`user/libc/src`), the shell and utilities (`user/bin`), and
+`kernel/lib/crc32.c`.

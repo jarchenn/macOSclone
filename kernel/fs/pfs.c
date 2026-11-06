@@ -6,6 +6,8 @@
 #define SB_MAGIC "AURPFS01"
 #define CAT_MAGIC 0x4C544143u /* "CATL" */
 #define ENTRY_HDR 16u
+#define ENTRY_META 20u /* v2: u16 mode, u16 0, u32 uid, u32 gid, u64 mtime */
+#define CAT_FLAG_META 1u
 
 /* Superblock (first 64 bytes of a superblock block, rest zero):
  *   0  char[8] magic   8 u32 version   12 u32 block_size
@@ -13,7 +15,10 @@
  *  32 u32 cat_start   36 u32 cat_blocks  40 u32 cat_bytes  44 u32 cat_crc
  *  48 u32 entry_count 52 u32 reserved    56 u32 reserved   60 u32 sb_crc (bytes 0..59)
  * Catalog: u32 magic, u32 count, then entries:
- *   u8 type, u8 0, u16 path_len, u32 size, u32 start, u32 crc, path bytes. */
+ *   u8 type, u8 flags, u16 path_len, u32 size, u32 start, u32 crc, path bytes,
+ *   and when flags & 1 (written by 0.6 and later) ENTRY_META bytes of metadata.
+ * Catalogs without the flag (0.3-0.5) load with default metadata and gain
+ * it on the next commit. The superblock version stays 1. */
 
 static void put32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
 static void put64(uint8_t *p, uint64_t v) { put32(p, (uint32_t)v); put32(p + 4, (uint32_t)(v >> 32)); }
@@ -135,7 +140,7 @@ static size_t catalog_size(const struct pfs_entry *e, size_t n)
 {
     size_t sz = 8;
     for (size_t i = 0; i < n; i++)
-        sz += ENTRY_HDR + strlen(e[i].path);
+        sz += ENTRY_HDR + strlen(e[i].path) + ENTRY_META;
     return sz;
 }
 
@@ -183,14 +188,21 @@ int pfs_commit(struct pfs *fs, struct pfs_entry *e, size_t n)
             size_t pl = strlen(e[i].path);
             uint32_t crc = e[i].dirty ? crc32(e[i].data, e[i].size) : e[i].crc;
             cat[off] = e[i].type;
-            cat[off + 1] = 0;
+            cat[off + 1] = CAT_FLAG_META;
             cat[off + 2] = (uint8_t)pl;
             cat[off + 3] = (uint8_t)(pl >> 8);
             put32(cat + off + 4, e[i].type == 1 ? e[i].size : 0);
             put32(cat + off + 8, e[i].type == 1 ? new_start[i] : 0);
             put32(cat + off + 12, e[i].type == 1 ? crc : 0);
             memcpy(cat + off + ENTRY_HDR, e[i].path, pl);
-            off += ENTRY_HDR + pl;
+            uint8_t *m = cat + off + ENTRY_HDR + pl;
+            m[0] = (uint8_t)e[i].mode;
+            m[1] = (uint8_t)(e[i].mode >> 8);
+            m[2] = m[3] = 0;
+            put32(m + 4, e[i].uid);
+            put32(m + 8, e[i].gid);
+            put64(m + 12, (uint64_t)e[i].mtime);
+            off += ENTRY_HDR + pl + ENTRY_META;
         }
         r = alloc_extent(fs, blocks_for(cbytes), &cstart);
         if (r == PFS_OK)
@@ -325,6 +337,7 @@ int pfs_mount(struct pfs *fs, struct pfs_blockdev *dev, pfs_emit_fn emit, void *
             }
             memset(ent, 0, sizeof *ent);
             ent->type = cat[off];
+            uint8_t eflags = cat[off + 1];
             uint32_t pl = (uint32_t)cat[off + 2] | (uint32_t)cat[off + 3] << 8;
             ent->size = get32(cat + off + 4);
             ent->start = get32(cat + off + 8);
@@ -337,6 +350,18 @@ int pfs_mount(struct pfs *fs, struct pfs_blockdev *dev, pfs_emit_fn emit, void *
             memcpy(ent->path, cat + off + ENTRY_HDR, pl);
             ent->path[pl] = '\0';
             off += ENTRY_HDR + pl;
+            ent->mode = ent->type == 2 ? 0755 : 0644;
+            if (eflags & CAT_FLAG_META) {
+                if (off + ENTRY_META > b->cat_bytes) {
+                    r = PFS_E_CORRUPT;
+                    break;
+                }
+                ent->mode = (uint16_t)((cat[off] | cat[off + 1] << 8) & 07777);
+                ent->uid = get32(cat + off + 4);
+                ent->gid = get32(cat + off + 8);
+                ent->mtime = (int64_t)get64(cat + off + 12);
+                off += ENTRY_META;
+            }
             if (ent->type == 1) {
                 ent->nblocks = blocks_for(ent->size);
                 if (ent->size && (ent->start < 2 || (uint64_t)ent->start + ent->nblocks > fs->nblocks)) {

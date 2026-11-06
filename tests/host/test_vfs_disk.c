@@ -71,8 +71,25 @@ TEST(remove_and_rename_in_ram)
     CHECK_EQ(vfs_stat("/home/b.txt", &st), VFS_OK);
     CHECK_EQ(vfs_rename("/home/d", "/home/d/inside"), VFS_EINVAL); /* into itself */
     CHECK_EQ(vfs_write_file("/home/c.txt", "C", 1), VFS_OK);
-    CHECK_EQ(vfs_rename("/home/b.txt", "/home/c.txt"), VFS_EEXIST);
-    CHECK_EQ(vfs_rename("/home/b.txt", "/system/x"), VFS_ENOENT);  /* no /system here */
+    /* POSIX rename (0.6): a file replaces an existing file atomically. */
+    CHECK_EQ(vfs_rename("/home/b.txt", "/home/c.txt"), VFS_OK);
+    char rb[4];
+    size_t rlen = 0;
+    CHECK_EQ(vfs_read_file("/home/c.txt", rb, sizeof rb, &rlen), VFS_OK);
+    CHECK_EQ(rlen, 1u);
+    CHECK_EQ(rb[0], 'A');
+    CHECK_EQ(vfs_stat("/home/b.txt", &st), VFS_ENOENT);
+    CHECK_EQ(vfs_mkdir("/home/e"), VFS_OK);
+    CHECK_EQ(vfs_rename("/home/c.txt", "/home/e"), VFS_EISDIR);    /* file over directory */
+    CHECK_EQ(vfs_rename("/home/e", "/home/c.txt"), VFS_ENOTDIR);   /* directory over file */
+    CHECK_EQ(vfs_rename("/home/c.txt", "/tmp/c.txt"), VFS_EXDEV);  /* /tmp is another file system */
+    int busy = vfs_open("/home/c.txt", VFS_O_READ);
+    CHECK_EQ(vfs_write_file("/home/f.txt", "F", 1), VFS_OK);
+    CHECK_EQ(vfs_rename("/home/f.txt", "/home/c.txt"), VFS_EBUSY); /* open target is kept */
+    vfs_close(busy);
+    CHECK_EQ(vfs_remove("/home/f.txt"), VFS_OK);
+    CHECK_EQ(vfs_remove("/home/e"), VFS_OK);
+    CHECK_EQ(vfs_rename("/home/c.txt", "/system/x"), VFS_ENOENT);  /* no /system here */
     CHECK_EQ(vfs_remove("/home/d"), VFS_OK);
     CHECK_EQ(vfs_remove("/home"), VFS_EINVAL);   /* mount point */
     CHECK_EQ(vfs_remove("/home/nope"), VFS_ENOENT);
@@ -121,6 +138,42 @@ TEST(persistent_home_round_trip)
     CHECK_EQ(vfs_stat("/home/notes", &st), VFS_OK);
 }
 
+TEST(metadata_persists)
+{
+    /* 0.6: mode, owner, group and mtime are stored in the catalog; a file
+     * replaced by rename keeps the moved file's metadata. */
+    memset(disk, 0, sizeof disk);
+    bool formatted = false;
+    boot(&formatted);
+    struct vfs_cred c = { 1000, 1000, 0600 };
+    int fd = vfs_open_as("/home/secret.txt", VFS_O_WRITE | VFS_O_CREATE, &c);
+    CHECK(fd >= 0);
+    CHECK_EQ(vfs_write(fd, "s", 1), 1);
+    CHECK_EQ(vfs_close(fd), VFS_OK);
+    struct vfs_cred d = { 5, 6, 0750 };
+    CHECK_EQ(vfs_mkdir_as("/home/dir", &d), VFS_OK);
+    CHECK_EQ(vfs_chmod("/home/notes", 0711), VFS_OK);
+    CHECK_EQ(vfs_chown("/home/notes", 7, 8), VFS_OK);
+    CHECK_EQ(vfs_write_file("/home/target.txt", "old", 3), VFS_OK);
+    CHECK_EQ(vfs_rename("/home/secret.txt", "/home/target.txt"), VFS_OK);
+    boot(&formatted);
+    CHECK(!formatted);
+    struct vfs_stat st;
+    CHECK_EQ(vfs_stat("/home/target.txt", &st), VFS_OK);
+    CHECK_EQ(st.mode, 0600);
+    CHECK_EQ(st.uid, 1000u);
+    CHECK_EQ(st.gid, 1000u);
+    CHECK_EQ(st.size, 1u);
+    CHECK_EQ(vfs_stat("/home/secret.txt", &st), VFS_ENOENT);
+    CHECK_EQ(vfs_stat("/home/dir", &st), VFS_OK);
+    CHECK_EQ(st.mode, 0750);
+    CHECK_EQ(st.uid, 5u);
+    CHECK_EQ(st.gid, 6u);
+    CHECK_EQ(vfs_stat("/home/notes", &st), VFS_OK);
+    CHECK_EQ(st.mode, 0711);
+    CHECK_EQ(st.uid, 7u);
+}
+
 TEST(disk_full_reported)
 {
     memset(disk, 0, sizeof disk);
@@ -143,5 +196,6 @@ void run_tests(void)
 {
     RUN(remove_and_rename_in_ram);
     RUN(persistent_home_round_trip);
+    RUN(metadata_persists);
     RUN(disk_full_reported);
 }

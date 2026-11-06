@@ -72,6 +72,37 @@ enter_user:
     iretq
     .size enter_user, . - enter_user
 
+/* NORETURN void enter_user_frame(const struct interrupt_frame *f)
+ * Loads every general register from f (arch/cpu.h layout) and returns to
+ * ring 3 through iretq: new threads, fork children. */
+    .global enter_user_frame
+    .type enter_user_frame, @function
+enter_user_frame:
+    cli
+    mov $0x1B, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %rdi, %rsp
+    pop %r15
+    pop %r14
+    pop %r13
+    pop %r12
+    pop %r11
+    pop %r10
+    pop %r9
+    pop %r8
+    pop %rbp
+    pop %rdi
+    pop %rsi
+    pop %rdx
+    pop %rcx
+    pop %rbx
+    pop %rax
+    add $16, %rsp           /* vector, error code */
+    swapgs                  /* kernel per-CPU base -> KERNEL_GS_BASE */
+    iretq
+    .size enter_user_frame, . - enter_user_frame
+
 /* int probe_read64(const uint64_t *addr, uint64_t *out)
  * Reads one word; returns 0, or -1 if the read faulted. A kernel page fault
  * whose RIP is probe_read64 resumes at probe_read64_fault (interrupts.c). */

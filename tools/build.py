@@ -27,10 +27,11 @@ import aurora_env as env  # noqa: E402
 import fetch_deps  # noqa: E402
 import mkfat  # noqa: E402
 import make_initramfs  # noqa: E402
+import userland  # noqa: E402
 
 ROOT = env.ROOT
 BUILD = env.BUILD
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 VARIANTS = {
     "release": [],
@@ -51,19 +52,6 @@ KERNEL_CFLAGS = [
     "-Werror=incompatible-pointer-types", "-Werror=int-conversion",
 ]
 
-USER_CFLAGS = [
-    "--target=x86_64-unknown-none-elf",
-    "-std=c11", "-ffreestanding", "-nostdlibinc", "-fno-builtin-printf",
-    "-fno-stack-protector", "-fno-stack-check", "-fno-pic", "-fno-pie",
-    "-mgeneral-regs-only", "-mno-mmx", "-mno-sse", "-mno-sse2", "-mno-80387",
-    "-fno-omit-frame-pointer", "-fno-strict-aliasing", "-fwrapv", "-O2", "-g",
-    "-Wall", "-Wextra", "-Wno-unused-parameter",
-]
-# The user runtime reuses the kernel's freestanding string/format code.
-USER_LIB_SOURCES = [
-    "user/lib/crt0.S", "user/lib/libc.c",
-    "kernel/lib/format.c", "kernel/lib/string.c", "kernel/lib/memory.c", "kernel/lib/crc32.c",
-]
 
 # Kernel modules that are hardware independent and compiled into host tests.
 HOST_TEST_SOURCES = [
@@ -198,38 +186,38 @@ def compile_obj(cc, flags, src: Path, objdir: Path, force: bool) -> Path:
 
 
 def build_user(variant: str) -> dict:
-    """Builds every user/bin/*.c program; returns {name: elf_path}."""
+    """Builds every user/bin/*.c program against newlib + Aurora's libc
+    layer (tools/userland.py); returns {name: elf_path}."""
+    userland.ensure_sysroot()
     cc = env.require("clang", env.clang())
-    ld = env.require("ld.lld", env.lld())
     udir = BUILD / variant / "user"
     objdir = udir / "obj"
-    flags = USER_CFLAGS + ["-I" + str(ROOT / "user/include"), "-I" + str(ROOT / "kernel/include"),
-                           f'-DAURORA_VERSION="{VERSION}"']
+    flags = userland.target_flags(userland.USER_PROGRAM_FLAGS + [f'-DAURORA_VERSION="{VERSION}"'])
     stamp = udir / "flags.txt"
-    flagline = " ".join(flags)
+    flagline = " ".join(flags) + (userland.SYSROOT / "lib" / "aurora.stamp").read_text()
     force = not stamp.exists() or stamp.read_text() != flagline
     udir.mkdir(parents=True, exist_ok=True)
     stamp.write_text(flagline)
-    lib_objs = [compile_obj(cc, flags, ROOT / s, objdir, force) for s in USER_LIB_SOURCES]
     script = ROOT / "user/linker.ld"
+    libs = [userland.SYSROOT / "lib" / n for n in ("crt0.o", "libaurora.a", "libc.a", "libm.a")]
     out = {}
     for src in sorted((ROOT / "user/bin").glob("*.c")):
         obj = compile_obj(cc, flags, src, objdir, force)
         elf = udir / src.stem
-        objs = lib_objs + [obj]
-        if (not elf.exists() or any(o.stat().st_mtime > elf.stat().st_mtime for o in objs)
-                or script.stat().st_mtime > elf.stat().st_mtime):
+        deps = [obj, script] + libs
+        if not elf.exists() or any(d.stat().st_mtime > elf.stat().st_mtime for d in deps):
             print(f"  ULD {rel(elf)}")
-            run([ld, "-nostdlib", "-static", "-z", "max-page-size=0x1000", "-z", "noexecstack",
-                 "--build-id=none", "--no-undefined", "--strip-debug", "-T", str(script), "-o", str(elf)]
-                + [str(o) for o in objs])
+            userland.link_program([obj], elf, script)
         out[src.stem] = elf
+    for name, elf in userland.build_ports(variant).items():
+        out[name] = elf
     return out
 
 
 def build_initramfs(variant: str, programs: dict) -> Path:
     out = BUILD / variant / "initramfs.img"
     extra = {f"system/bin/{name}": path.read_bytes() for name, path in programs.items()}
+    extra.update(userland.port_data())
     data = make_initramfs.pack(ROOT / "initramfs", extra)
     if not out.exists() or out.read_bytes() != data:
         print(f"  FS  {rel(out)}")
@@ -409,6 +397,19 @@ def cmd_check(args):
             check(elf_path.read_bytes() in img, "image contains the current kernel.elf")
         else:
             check(False, f"{rel(img_path)} exists")
+        # 0.6: every user program is a static non-PIE executable with W^X
+        # segments and (when it has thread-local data) one PT_TLS header.
+        progs = sorted(p for p in (BUILD / v / "user").iterdir() if p.is_file() and p.suffix == "")
+        bad = []
+        for p in progs:
+            u = parse_elf(p)
+            types = [ph["type"] for ph in u["phdrs"]]
+            wx = any(ph["type"] == 1 and (ph["flags"] & 2) and (ph["flags"] & 1) for ph in u["phdrs"])
+            if u["type"] != 2 or 3 in types or 2 in types or wx or types.count(7) > 1 or u["entry"] != 0x400000:
+                bad.append(p.name)
+        check(len(progs) >= 40 and not bad,
+              f"{len(progs)} user programs: static ET_EXEC at 0x400000, no PT_INTERP/PT_DYNAMIC, W^X"
+              + (f" (bad: {', '.join(bad)})" if bad else ""))
     sys.exit(0 if ok else 1)
 
 
@@ -450,6 +451,7 @@ HELP = """Aurora OS 0.1 - make targets
   make integration  real-guest input / window / file / process tests via QMP (test build)
   make storage      persistent /home: reboot, power loss, crash-consistency stress
   make network      DHCP, ping, DNS, UDP, TCP and HTTP against host-side test servers
+  make posix        0.6 POSIX userland acceptance tests (pipelines, signals, fork, Lua test suite)
   make soak         4-minute random input + idle soak test
   make check        image and linkage consistency checks
   make clean        remove build/ only

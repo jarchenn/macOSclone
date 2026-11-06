@@ -37,6 +37,11 @@ struct vfs_node {
     /* Persistent backend bookkeeping (PFS extent of the committed copy). */
     uint32_t disk_start, disk_blocks, disk_crc;
     bool dirty;
+    /* 0.6 metadata */
+    uint16_t mode;
+    uint32_t uid, gid;
+    uint32_t ino;
+    int64_t mtime;
 };
 
 extern const struct fs_backend ramfs_backend;

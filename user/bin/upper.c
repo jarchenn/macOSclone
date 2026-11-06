@@ -1,16 +1,20 @@
-/* upper: echoes console input in upper case until end-of-input (Ctrl+D). */
-#include "aurora.h"
+/* upper: echoes input lines in upper case until end-of-input (Ctrl+D). */
+#include <ctype.h>
+#include <stdio.h>
+#include <string.h>
 
 int main(void)
 {
     char line[256];
-    long n, lines = 0;
+    long lines = 0;
+    setvbuf(stdout, NULL, _IOLBF, 0);
     printf("upper: type lines, Ctrl+D to finish\n");
-    while ((n = readline(line, sizeof line)) >= 0) {
-        for (long i = 0; i < n; i++)
-            if (line[i] >= 'a' && line[i] <= 'z')
-                line[i] = (char)(line[i] - 32);
-        printf("%s\n", line);
+    while (fgets(line, sizeof line, stdin)) {
+        for (char *p = line; *p; p++)
+            *p = (char)toupper((unsigned char)*p);
+        fputs(line, stdout);
+        if (!strchr(line, '\n'))
+            putchar('\n');
         lines++;
     }
     printf("upper: %ld lines\n", lines);

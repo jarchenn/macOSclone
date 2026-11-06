@@ -32,7 +32,9 @@ is still a kernel panic.
 | `kernel/core/` | boot-info validation, logging/test markers, panic, event queues, scheduler, processes, syscalls, ELF validation, main |
 | `kernel/net/` | protocol parsing (portable), ARP/IPv4/ICMP/UDP/DHCP/DNS stack, TCP |
 | `kernel/include/abi/` | the user/kernel ABI shared with `user/` |
-| `user/` | user runtime (crt0, libc) and the programs in `/system/bin` |
+| `user/libc/` | Aurora's libc layer over newlib: crt0, start-up, system-call wrappers, pthreads, locks, posix_spawn, termios; header overrides (0.6) |
+| `user/bin/` | the programs in `/system/bin`: shell, utilities, tests, network tools |
+| `tools/userland.py` | builds the sysroot (newlib, libc layer) and Lua (0.6) |
 | `kernel/memory/` | bitmap physical allocator, virtual layout, heap core + kernel heap |
 | `kernel/drivers/` | serial, framebuffer, PIC, LAPIC + IOAPIC, PIT, PS/2 controller (+ Caps Lock LED), keyboard & mouse decoders, ACPI tables (portable parser) + power, PCI, VirtIO core, virtio-blk, virtio-net |
 | `kernel/fs/` | path rules, VFS core + open-file table, ramfs and read-only backends, initramfs parser, PFS (persistent, copy-on-write) |
@@ -54,8 +56,9 @@ and are compiled unchanged into the host tests.
    alike: `[r15..rax][vector][error][rip cs rflags rsp ss]`.
 2. `isr_common` saves all GPRs, clears DF, re-aligns RSP to 16 bytes and
    calls `interrupt_dispatch(frame)`.
-3. Vectors 0–31: taken in user mode (CS RPL 3) → `process_fault` kills the
-   process; taken in kernel mode → `panic_exception`. #DF runs on IST1 and
+3. Vectors 0–31: taken in user mode (CS RPL 3) → page faults inside a
+   region are resolved (demand paging, copy-on-write); anything else becomes
+   a signal for the thread (`process_user_exception`); taken in kernel mode → `panic_exception`. #DF runs on IST1 and
    NMI/#MC on IST2 (per CPU), so a stack overflow into the guard page still
    reports. Entries from ring 3 execute SWAPGS first (per-CPU data).
    Vector 0x80 (DPL 3 gate) → `syscall_dispatch`.
@@ -68,7 +71,8 @@ syscall handler re-enables interrupts). Handlers are short: PIT increments a
 64-bit tick counter and calls `sched_tick`; PS/2 reads bytes, pushes them to
 bounded rings and wakes the desktop task. No allocation, rendering or file I/O
 in IRQ context. After EOI, a return to user mode (or idle) may switch tasks,
-and a process with a pending kill exits there.
+and every return to user mode runs `signal_return_to_user` (signal
+delivery, thread exit).
 
 ## Event handling
 

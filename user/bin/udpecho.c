@@ -1,6 +1,13 @@
 /* udpecho <ip> <port> <message> [count]: sends datagrams to a UDP echo
  * server and checks the replies. */
-#include "aurora.h"
+#include <errno.h>
+#include <fcntl.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <aurora.h>
 
 int main(int argc, char **argv)
 {
@@ -9,31 +16,31 @@ int main(int argc, char **argv)
         return 2;
     }
     uint32_t ip;
-    if (!parse_ipv4(argv[1], &ip)) {
+    if (!aurora_parse_ipv4(argv[1], &ip)) {
         printf("udpecho: bad address\n");
         return 2;
     }
     uint16_t port = (uint16_t)atol(argv[2]);
     long count = argc > 4 ? atol(argv[4]) : 3;
-    int s = socket(AURORA_SOCK_UDP);
+    int s = aurora_socket(AURORA_SOCK_UDP);
     if (s < 0) {
-        printf("udpecho: %s\n", strerror(s));
+        printf("udpecho: %s\n", strerror(errno));
         return 1;
     }
     int ok = 0;
     for (long i = 1; i <= count; i++) {
         char msg[200];
         int n = snprintf(msg, sizeof msg, "%s #%ld", argv[3], i);
-        long r = sendto(s, msg, (size_t)n, ip, port);
+        long r = aurora_sendto(s, msg, (size_t)n, ip, port);
         if (r < 0) {
-            printf("udpecho: send: %s\n", strerror(r));
+            printf("udpecho: send: %s\n", strerror(errno));
             break;
         }
         char reply[256];
         struct aurora_sockaddr from;
-        long got = recvfrom(s, reply, sizeof reply - 1, &from, 2000);
+        long got = aurora_recvfrom(s, reply, sizeof reply - 1, &from, 2000);
         if (got < 0) {
-            printf("udpecho: #%ld: %s\n", i, strerror(got));
+            printf("udpecho: #%ld: %s\n", i, strerror(errno));
             continue;
         }
         reply[got] = 0;

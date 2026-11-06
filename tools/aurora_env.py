@@ -63,6 +63,11 @@ def lld():
     return _find(["ld.lld"], _WIN_LLVM, env="AURORA_LD")
 
 
+def llvm_tool(name):
+    """llvm-ar and friends (user-space archives, 0.6)."""
+    return require(name, _find([name], _WIN_LLVM))
+
+
 def host_cc():
     if IS_WINDOWS:
         return _find(["x86_64-w64-mingw32-clang", "gcc"], env="AURORA_HOST_CC")

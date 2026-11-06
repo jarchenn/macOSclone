@@ -43,6 +43,13 @@ phys_addr_t pmm_alloc_contig(size_t pages); /* zeroed, physically contiguous */
 void pmm_free_page(phys_addr_t addr);
 void pmm_reclaim_bootloader(void);
 const struct pmm *pmm_state(void);
+/* Page sharing for copy-on-write (0.6). A page starts with one owner;
+ * pmm_page_share adds one, pmm_page_release drops one and frees the page
+ * when the last owner lets go. Only pages from pmm_alloc_page qualify. */
+void pmm_page_share(phys_addr_t pa);
+void pmm_page_release(phys_addr_t pa);
+uint32_t pmm_page_owners(phys_addr_t pa);
+uint64_t pmm_free_count(void);
 #endif
 
 #endif

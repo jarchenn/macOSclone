@@ -132,9 +132,11 @@ stack, the test page) send IPI 0x42 to every other online CPU and wait for
 each to acknowledge. Only then are the pages freed. Senders are serialized,
 and a sender spins with interrupts enabled. Shootdowns run with no spinlock
 held, which is asserted, so no CPU can be stuck with interrupts off waiting
-for a lock the sender holds. User address spaces need no shootdown yet:
-processes are single-threaded, and every CR3 switch flushes non-global
-entries (no global pages are used).
+for a lock the sender holds. Since 0.6 user address spaces need them too:
+a process's threads may run on several CPUs, so `memory/uvm.c` shoots down
+`munmap`, `mprotect`, copy-on-write copies and fork's write-protection on
+every CPU that has the address space loaded, before freeing any page. A
+CR3 switch still flushes everything else (no global pages are used).
 
 ## ACPI power
 

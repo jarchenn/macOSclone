@@ -1,5 +1,6 @@
 /* hello: smallest Aurora program. */
-#include "aurora.h"
+#include <stdio.h>
+#include <unistd.h>
 
 int main(int argc, char **argv)
 {

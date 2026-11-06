@@ -22,9 +22,9 @@ compiler supports them (llvm-mingw on Windows does).
 | elf | 30 | every ELF validation error: truncation, class, type, machine, phdr bounds, segment range, overlap, W+X, entry, size |
 | net | 122 | IPv4/UDP/TCP/ICMP checksums and parsing, truncated and bad-length packets, DNS query building and answer parsing (compression, loops, CNAME, NXDOMAIN), DHCP options |
 | pfs | 61 | format/mount/commit, a simulated power loss after every block write of a commit, torn superblocks, corrupt catalogs, refusing foreign disks, space limits |
-| vfs_disk | 49 | the VFS on PFS: create/write/remove/rename persisted across remount, busy and non-empty errors |
+| vfs_disk | 89 | the VFS on PFS: create/write/remove/rename persisted across remount, busy and non-empty errors |
 
-Final run: **10/10 suites, 7257 checks, 0 failures** (ASan+UBSan on).
+Final run: **10/10 suites, 7297 checks, 0 failures** (ASan+UBSan on).
 
 ## 2. Real-guest smoke tests: `make smoke`
 
@@ -90,6 +90,18 @@ user time on all four CPUs; runs the TLB shootdown test with its control;
 checks that QMP `system_powerdown` shuts down cleanly with a file that is
 intact after reboot; and runs the `-smp 8` stress. Result: **7/7**, plus the
 30-minute stress (see `STATUS.md`).
+
+## 7. POSIX userland: `make posix`
+
+`tools/posix_test.py` runs the 0.6 acceptance tests from the Terminal:
+`posixtest` (printf/malloc/file I/O/mmap/8 pthreads), a `cat | grep | wc -l
+>` pipeline checked against a host-side count, Ctrl+C under `sh`,
+`proctest` (segfaulting child via waitpid, exec, posix_spawn, orphans,
+pipes, poll, dup), `forktest 1000` (free page baseline), `sigtest`
+(register-clobbering handlers, pending signals, EINTR, SA_RESTART),
+`permtest` (uid 1000 vs a root 0600 file), VT100 rendering, `rentest`
+across a reboot with a data disk, and Lua 5.4.9's test suite (portable
+subset, `_U`). Result: **10/10 at -smp 1 and at -smp 4**.
 
 ## Manual checks
 

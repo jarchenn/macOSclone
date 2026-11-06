@@ -62,12 +62,44 @@ covers the VFS, network, drivers, desktop and the user page-fault path
 Deferred by the roadmap: NUMA, CPU hotplug, S3, frequency scaling, x2APIC,
 kernel preemption.
 
-## 0.6 and later
+## 0.6: POSIX-ish userland (done, with recorded deviations)
 
-Not started. 0.6 (POSIX-ish userland) needs a libc port (mlibc or newlib),
-`fork`/`exec`/`waitpid`, threads with futexes, pipes, signals, a pty and a
-shell with pipelines. 0.8 needs a physical reference machine. These are
-tracked against the roadmap document's acceptance tests.
+Details in [userland.md](userland.md); decisions D-0.6-1..6 in
+[decisions.md](decisions.md); evidence in `STATUS.md` (`make posix`).
+
+* 0.6a ABI and toolchain: clang for `x86_64-unknown-none-elf`, a sysroot,
+  System V initial stack with argc/argv/envp/auxv, TLS through FS base,
+  per-thread FPU/SSE state. Done.
+* 0.6b C library: newlib 4.6.0 with Aurora's OS layer; `mmap`/`munmap`/
+  `mprotect`, `clock_gettime`, process calls, libm. Done.
+* 0.6c Process model: native `posix_spawn`, `fork` with copy-on-write,
+  `execve`, `waitpid` with exit status, orphans re-parented to init;
+  threads + futex, pthreads. Done.
+* 0.6d File descriptors: one table for files, directories, pipes, sockets
+  and devices; `dup`/`dup2`, close-on-exec, `O_NONBLOCK`, `fcntl` subset,
+  `poll` (and `select` in libc). Done.
+* 0.6e Pipes and signals: as specified, including the signal frame,
+  `sigreturn`, masks and EINTR. Done.
+* 0.6f VFS completion: `unlink`, atomic `rename`, `mkdir`/`rmdir`,
+  `truncate`, directory iteration, per-process cwd. Done (no symlinks;
+  optional in the roadmap).
+* 0.6g Permissions: uid/gid on processes, mode bits on files (persisted),
+  enforced in open and exec. Done; the session runs as root (D-0.6-5).
+* 0.6h Terminal and shell: pty with a line discipline, VT100-subset
+  Terminal, a shell with pipelines and redirection, small coreutils. Done
+  (original shell and utilities, D-0.6-4).
+* Acceptance tests: all nine pass at `-smp 1` and `-smp 4` (`make posix`);
+  the Lua test suite is run in its portable subset (`_U`).
+
+Deferred by the roadmap: dynamic linking, shared memory, job control,
+multiple terminals, Linux ABI compatibility. Still open from 0.5: user page
+faults are resolved under the BKL (D-0.6-6).
+
+## 0.7 and later
+
+Not started. 0.7 (desktop maturity) needs shared-memory surfaces first; 0.8
+needs a physical reference machine. These are tracked against the roadmap
+document's acceptance tests.
 
 ## Later items (from the 0.1 roadmap)
 

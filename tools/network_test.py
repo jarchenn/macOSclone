@@ -120,7 +120,13 @@ def run(g, cmd, expect, timeout=30):
     since = g.mark()
     g.type_text(cmd + "\n")
     g.wait_for(r"@@TERM aurora:\S*\$ " + re.escape(cmd) + r"\s*$", timeout=timeout, since=since)
-    return g.wait_for(expect, timeout=timeout, since=since)
+    m = g.wait_for(expect, timeout=timeout, since=since)
+    # 0.6: keys typed while a program runs go to its terminal, so let a
+    # foreground program finish before the next command is typed.
+    started = re.search(r"@@PROC_START pid=(\d+) ", g.serial()[since:])
+    if started and not cmd.rstrip().endswith("&"):
+        g.wait_for(rf"@@PROC_EXIT pid={started.group(1)} ", timeout=timeout, since=since)
+    return m
 
 
 def check(name, fn, *a):
@@ -191,8 +197,8 @@ def main():
             # the network delivers one; QEMU's slirp on Windows drops the SYN
             # silently instead, so the connect then times out after 5 s.
             c = run(g, f"fetch http://{H}:{ports['closed']}/",
-                    r"@@TERM fetch: connect 10\.0\.2\.2:\d+: (connection refused|connection reset|timed out)", timeout=20)
-            m = run(g, "ping 10.0.2.77 1", r"@@TERM seq=1: (host unreachable|timed out)")
+                    r"@@TERM fetch: connect 10\.0\.2\.2:\d+: (Connection refused|Connection reset by peer|Connection timed out)", timeout=20)
+            m = run(g, "ping 10.0.2.77 1", r"@@TERM seq=1: (Host is unreachable|Connection timed out)")
             run(g, "fetch https://example.com/", r"@@TERM fetch: https is not supported")
             return f"closed port: {c.group(1)}; unknown host: {m.group(1)}; https rejected"
 
@@ -201,7 +207,7 @@ def main():
             g.type_text(f"fetch http://{H}:{ports['http']}/hang &\n")
             pid = g.wait_for(r"@@PROC_START pid=(\d+) name=fetch", timeout=10, since=since).group(1)
             time.sleep(2.0)
-            run(g, f"kill {pid}", rf"@@PROC_EXIT pid={pid} name=fetch status=-1 reason=killed", timeout=15)
+            run(g, f"kill {pid}", rf"@@PROC_EXIT pid={pid} name=fetch status=9 reason=killed by SIGKILL", timeout=15)
             run(g, f"fetch http://{H}:{ports['http']}/hello.txt", r"@@TERM Hello from the host!")
             return "a process blocked in recv() was killed; networking kept working"
 

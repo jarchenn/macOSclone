@@ -49,9 +49,14 @@ void interrupt_dispatch(struct interrupt_frame *f)
             f->rip = (uint64_t)(uintptr_t)probe_read64_fault; /* expected fault in a probe */
             return;
         }
-        if (from_user)
-            process_fault(f); /* kills the process; the kernel carries on */
-        panic_exception(f);   /* a fault in kernel mode is fatal */
+        if (!from_user)
+            panic_exception(f); /* a fault in kernel mode is fatal */
+        /* User mode: page faults are resolved (demand paging, copy-on-write);
+         * anything else becomes a signal for the thread. */
+        process_user_exception(f);
+        sched_preempt_point(true);
+        signal_return_to_user(f);
+        return;
     }
 
     if (v == SYSCALL_VECTOR) {
@@ -93,5 +98,5 @@ void interrupt_dispatch(struct interrupt_frame *f)
     /* Only user mode and the idle task are preemptible (see sched.h). */
     sched_preempt_point(from_user);
     if (from_user)
-        process_check_kill();
+        signal_return_to_user(f);
 }

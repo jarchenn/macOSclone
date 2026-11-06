@@ -514,6 +514,16 @@ long sock_recv(int s, void *buf, uint64_t len, uint64_t timeout_ms)
     return tcp_recv(k->tcb, buf, len, timeout_ms);
 }
 
+int sock_poll(int s)
+{
+    struct socket *k = sock_get(s);
+    if (!k)
+        return 4;
+    if (k->type == AURORA_SOCK_UDP)
+        return (k->qn ? 1 : 0) | 2;
+    return k->tcb ? tcp_poll(k->tcb) : 4;
+}
+
 int sock_close(int s)
 {
     struct socket *k = sock_get(s);

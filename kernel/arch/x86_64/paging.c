@@ -169,7 +169,7 @@ uint64_t paging_free_user_half(uint64_t *pml4)
                 uint64_t *pt = table_virt(e1);
                 for (unsigned l = 0; l < 512; l++) {
                     if (pt[l] & PTE_P) {
-                        pmm_free_page(pt[l] & PTE_ADDR);
+                        pmm_page_release(pt[l] & PTE_ADDR); /* pages may be shared (fork) */
                         pages++;
                     }
                 }

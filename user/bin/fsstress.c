@@ -1,9 +1,14 @@
 /* fsstress ID ROUNDS: rewrites four files in /home/fsID for ROUNDS rounds,
  * reading each back and comparing every byte and its CRC-32. Several copies
  * run in parallel on different CPUs in the SMP stress test. */
-#include "aurora.h"
-
-uint32_t crc32_update(uint32_t crc, const void *data, size_t len);
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <aurora.h>
 
 static uint8_t wbuf[4096], rbuf[4096];
 
@@ -29,9 +34,8 @@ int main(int argc, char **argv)
     long id = atol(argv[1]), rounds = atol(argv[2]);
     char dir[32], path[64];
     snprintf(dir, sizeof dir, "/home/fs%ld", id);
-    int mr = mkdir(dir);
-    if (mr < 0 && mr != -2 /* VFS_EEXIST */) {
-        printf("fsstress %ld: mkdir %s failed: %s\n", id, dir, strerror(mr));
+    if (mkdir(dir, 0755) < 0 && errno != EEXIST) {
+        printf("fsstress %ld: mkdir %s failed: %s\n", id, dir, strerror(errno));
         return 1;
     }
     long errors = 0, bytes = 0;
@@ -41,23 +45,23 @@ int main(int argc, char **argv)
             snprintf(path, sizeof path, "%s/f%d", dir, k);
             size_t n = fill(id, r, k);
             uint32_t want = crc32_update(0, wbuf, n);
-            int fd = open(path, AURORA_O_WRITE | AURORA_O_CREATE | AURORA_O_TRUNC);
-            if (fd < 0 || write(fd, wbuf, n) != (long)n) {
-                printf("fsstress %ld: write %s failed: %s\n", id, path, strerror(fd < 0 ? fd : -1));
+            int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd < 0 || write(fd, wbuf, n) != (ssize_t)n) {
+                printf("fsstress %ld: write %s failed: %s\n", id, path, strerror(errno));
                 errors++;
                 if (fd >= 0)
                     close(fd);
                 break;
             }
             close(fd);
-            fd = open(path, AURORA_O_READ);
-            long got = fd >= 0 ? read(fd, rbuf, sizeof rbuf) : fd;
+            fd = open(path, O_RDONLY);
+            ssize_t got = fd >= 0 ? read(fd, rbuf, sizeof rbuf) : -1;
             if (fd >= 0)
                 close(fd);
             uint32_t have = got > 0 ? crc32_update(0, rbuf, (size_t)got) : 0;
-            if (got != (long)n || have != want || memcmp(rbuf, wbuf, n)) {
-                printf("fsstress %ld: MISMATCH %s round %ld: %ld/%zu bytes crc %08x want %08x\n", id, path, r, got, n,
-                       have, want);
+            if (got != (ssize_t)n || have != want || memcmp(rbuf, wbuf, n)) {
+                printf("fsstress %ld: MISMATCH %s round %ld: %ld/%zu bytes crc %08x want %08x\n", id, path, r,
+                       (long)got, n, have, want);
                 errors++;
                 break;
             }

@@ -4,13 +4,16 @@
 
 /* Aurora VFS. One namespace rooted at "/":
  *   /system  read-only initramfs (boot module), data stays in module memory
- *   /home    writable RAM filesystem (session only: lost on restart)
+ *   /home    writable RAM filesystem, or PFS on the data disk (0.3)
+ *   /tmp     writable RAM filesystem (always lost on restart)
+ * Every node has a mode (permission bits), an owner and a group (0.6). The
+ * VFS stores them; the system call layer enforces them.
  * Paths are absolute after normalisation, at most VFS_PATH_MAX bytes, with
  * components of 1..VFS_NAME_MAX characters from [A-Za-z0-9._-]. */
 
 #define VFS_NAME_MAX 63
 #define VFS_PATH_MAX 255
-#define VFS_MAX_OPEN 32
+#define VFS_MAX_OPEN 256
 
 /* RAM filesystem limits */
 #define RAMFS_MAX_FILE (64u * 1024u)
@@ -37,17 +40,24 @@ enum vfs_err {
     VFS_EBUSY = -14,
     VFS_ENOTEMPTY = -15,
     VFS_EIO = -16,
+    VFS_EXDEV = -17,
 };
 
 #define VFS_O_READ 1u
 #define VFS_O_WRITE 2u
 #define VFS_O_CREATE 4u
 #define VFS_O_TRUNC 8u
+#define VFS_O_EXCL 16u
+#define VFS_O_APPEND 32u
 
 struct vfs_stat {
     uint8_t type;
     bool readonly;
     uint32_t size;
+    uint16_t mode; /* permission bits (07777) */
+    uint32_t uid, gid;
+    uint32_t ino;
+    int64_t mtime;
 };
 
 struct vfs_dirent {
@@ -55,7 +65,25 @@ struct vfs_dirent {
     uint8_t type;
     bool readonly;
     uint32_t size;
+    uint32_t ino;
 };
+
+/* Ownership and mode for nodes created by the next calls (0.6). The
+ * defaults (uid 0, gid 0, 0644 files, 0755 directories) apply to kernel
+ * callers such as the desktop apps. */
+struct vfs_cred {
+    uint32_t uid, gid;
+    uint16_t mode; /* already masked by the creator's umask */
+};
+int vfs_open_as(const char *path, unsigned flags, const struct vfs_cred *c);
+int vfs_mkdir_as(const char *path, const struct vfs_cred *c);
+int vfs_fstat(int fd, struct vfs_stat *st);
+int vfs_ftruncate(int fd, uint32_t size);
+int vfs_tell(int fd);
+int vfs_chmod(const char *path, uint16_t mode);
+int vfs_chown(const char *path, uint32_t uid, uint32_t gid);
+/* Clock used for modification times (seconds since 1970); NULL = 0. */
+void vfs_set_clock(int64_t (*now)(void));
 
 struct vfs_usage {
     uint32_t ram_bytes, ram_nodes, open_files;

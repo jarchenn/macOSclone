@@ -1,7 +1,14 @@
 /* fetch <http://host[:port]/path> [file]: HTTP/1.1 GET over the kernel's TCP.
  * Prints the status line and a summary (or saves the body to a file).
  * Plain HTTP only: there is no TLS in Aurora. */
-#include "aurora.h"
+#include <errno.h>
+#include <fcntl.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <aurora.h>
 
 static uint32_t crc32_user(const uint8_t *p, size_t n, uint32_t crc)
 {
@@ -42,37 +49,37 @@ int main(int argc, char **argv)
         port = (uint16_t)atol(colon + 1);
     }
     uint32_t ip;
-    int r = resolve(host, &ip, 4000);
+    int r = aurora_resolve(host, &ip, 4000);
     if (r) {
-        printf("fetch: %s: %s\n", host, strerror(r));
+        printf("fetch: %s: %s\n", host, errno == ENOENT ? "name not found" : strerror(errno));
         return 1;
     }
-    int s = socket(AURORA_SOCK_TCP);
+    int s = aurora_socket(AURORA_SOCK_TCP);
     if (s < 0) {
-        printf("fetch: %s\n", strerror(s));
+        printf("fetch: %s\n", strerror(errno));
         return 1;
     }
-    uint64_t t0 = uptime_ms();
-    r = connect(s, ip, port, 5000);
+    uint64_t t0 = aurora_uptime_ms();
+    r = aurora_connect(s, ip, port, 5000);
     if (r) {
-        printf("fetch: connect %s:%u: %s\n", host, port, strerror(r));
+        printf("fetch: connect %s:%u: %s\n", host, port, strerror(errno));
         close(s);
         return 1;
     }
     char req[512];
     int n = snprintf(req, sizeof req, "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: Aurora-fetch/0.1\r\nConnection: close\r\n\r\n", path, host);
-    if (send(s, req, (size_t)n) != n) {
+    if (aurora_send(s, req, (size_t)n) != n) {
         printf("fetch: send failed\n");
         close(s);
         return 1;
     }
     size_t total = 0;
     long got;
-    while (total < sizeof resp && (got = recv(s, resp + total, sizeof resp - total, 10000)) > 0)
+    while (total < sizeof resp && (got = aurora_recv(s, resp + total, sizeof resp - total, 10000)) > 0)
         total += (size_t)got;
     close(s);
     if (got < 0 && total == 0) {
-        printf("fetch: receive: %s\n", strerror(got));
+        printf("fetch: receive: %s\n", strerror(errno));
         return 1;
     }
     /* Split headers and body. */
@@ -94,11 +101,11 @@ int main(int argc, char **argv)
     size_t body = total - hdr_end;
     uint32_t crc = crc32_user((const uint8_t *)resp + hdr_end, body, 0);
     printf("%s\n", status);
-    printf("fetch: %zu body bytes in %llu ms, crc32 %08x\n", body, (unsigned long long)(uptime_ms() - t0), crc);
+    printf("fetch: %zu body bytes in %llu ms, crc32 %08x\n", body, (unsigned long long)(aurora_uptime_ms() - t0), crc);
     if (argc > 2) {
-        int fd = open(argv[2], AURORA_O_WRITE | AURORA_O_CREATE | AURORA_O_TRUNC);
+        int fd = open(argv[2], O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd < 0 || write(fd, resp + hdr_end, body) != (long)body) {
-            printf("fetch: cannot save to %s: %s\n", argv[2], strerror(fd < 0 ? fd : -1));
+            printf("fetch: cannot save to %s: %s\n", argv[2], strerror(errno));
             return 1;
         }
         close(fd);

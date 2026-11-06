@@ -54,6 +54,8 @@ int elf_validate(const uint8_t *d, size_t size, uint64_t base, uint64_t limit, s
         return ELF_E_PHDR;
     if (phoff > size || (uint64_t)phnum * phentsize > size - phoff)
         return ELF_E_PHDR;
+    out->phoff = phoff;
+    out->phnum = phnum;
     uint64_t total = 0;
     for (uint16_t i = 0; i < phnum; i++) {
         const uint8_t *ph = d + phoff + (uint64_t)i * phentsize;

@@ -1,4 +1,9 @@
-/* Terminal: a built-in command interpreter (not a POSIX shell). */
+/* Terminal: built-in commands plus a pseudo-terminal for programs (0.6).
+ * Programs run as session leaders on the Terminal's pty: their output goes
+ * through a small VT100-subset interpreter (CR, BS, TAB, CSI K/J/H/C/D/G/m)
+ * into the scrollback, and while one runs in the foreground every key is
+ * sent to the pty, whose line discipline echoes and edits (Ctrl-C there is
+ * SIGINT for the foreground process group). */
 #include "desktop/desktop.h"
 #include "apps/cmdline.h"
 #include "apps/textbuf.h"
@@ -15,6 +20,7 @@
 #include "drivers/framebuffer.h"
 #include "core/process.h"
 #include "core/sched.h"
+#include "core/pty.h"
 #include "net/net.h"
 #include "lib.h"
 
@@ -42,11 +48,17 @@ static struct {
     bool caret;
     bool warned_full;
     int fg_pid; /* foreground process receiving keyboard input, 0 = none */
-    struct {
-        int pid;
-        size_t n;
-        char buf[TERM_COLS + 1];
-    } partial[8]; /* unterminated output lines per process */
+    struct pty *pty;
+    /* Current (unterminated) output line and the VT100 parser state. */
+    char line[TERM_COLS + 1];
+    size_t line_n, line_cur;
+    uint8_t line_color, attr;
+    int esc;          /* 0 text, 1 after ESC, 2 in CSI */
+    /* Type-ahead: input the foreground program left unread when it exited,
+     * replayed as keys (to the Terminal or the next program) from tick(). */
+    char pending[CMD_LINE_MAX * 2];
+    size_t pend_n, pend_off;
+    int csi[4], ncsi;
 } T;
 
 static int cols(void)
@@ -401,57 +413,136 @@ static void cmd_theme(int argc, char **argv)
 
 /* ---- Processes -------------------------------------------------------- */
 
-static void flush_partial(int i)
+static void flush_line(void)
 {
-    if (T.partial[i].n) {
-        push_line(T.partial[i].buf, T.partial[i].n, C_TEXT);
-        T.partial[i].n = 0;
+    if (T.line_n) {
+        push_line(T.line, T.line_n, T.line_color);
+        T.line_n = T.line_cur = 0;
+        T.line_color = T.attr;
     }
 }
 
-static int partial_slot(int pid)
+static void put_char(char ch, size_t c)
 {
-    int free_slot = -1;
-    for (int i = 0; i < 8; i++) {
-        if (T.partial[i].pid == pid)
-            return i;
-        if (T.partial[i].pid == 0 && free_slot < 0)
-            free_slot = i;
+    if (T.line_cur >= c || T.line_cur >= TERM_COLS) {
+        flush_line(); /* wrap */
     }
-    if (free_slot < 0) {
-        free_slot = 0;
-        flush_partial(0);
-    }
-    T.partial[free_slot].pid = pid;
-    T.partial[free_slot].n = 0;
-    return free_slot;
+    T.line[T.line_cur++] = ch;
+    if (T.line_cur > T.line_n)
+        T.line_n = T.line_cur;
+    if (T.attr != C_TEXT)
+        T.line_color = T.attr;
 }
 
-/* Console sink: called from system calls of processes this Terminal runs.
- * `data` is a validated user pointer; it is only read during this call. */
-static void proc_output(void *ctx, int pid, const char *data, size_t len)
+static void csi_final(char f)
+{
+    int n = T.csi[0];
+    switch (f) {
+    case 'K': /* erase in line */
+        if (n == 0)
+            T.line_n = T.line_cur;
+        else if (n == 1)
+            for (size_t i = 0; i < T.line_cur && i < T.line_n; i++)
+                T.line[i] = ' ';
+        else
+            T.line_n = T.line_cur = 0;
+        break;
+    case 'J':
+        if (n == 2) {
+            T.count = T.head = 0;
+            T.line_n = T.line_cur = 0;
+        }
+        break;
+    case 'H':
+    case 'f':
+    case 'G': {
+        int col = (f == 'G' ? T.csi[0] : T.csi[1]);
+        T.line_cur = col > 0 ? (size_t)(col - 1) : 0;
+        if (T.line_cur > TERM_COLS - 1)
+            T.line_cur = TERM_COLS - 1;
+        while (T.line_n < T.line_cur)
+            T.line[T.line_n++] = ' ';
+        break;
+    }
+    case 'C':
+        for (int k = 0; k < (n ? n : 1) && T.line_cur < TERM_COLS - 1; k++) {
+            T.line_cur++;
+            while (T.line_n < T.line_cur)
+                T.line[T.line_n++] = ' ';
+        }
+        break;
+    case 'D':
+        T.line_cur = T.line_cur > (size_t)(n ? n : 1) ? T.line_cur - (size_t)(n ? n : 1) : 0;
+        break;
+    case 'm':
+        for (int i = 0; i < (T.ncsi ? T.ncsi : 1); i++) {
+            int a = T.csi[i];
+            if (a == 0) T.attr = C_TEXT;
+            else if (a == 2 || a == 90) T.attr = C_DIM;
+            else if (a == 31 || a == 91) T.attr = C_ERROR;
+            else if (a == 32 || a == 92) T.attr = C_PROMPT;
+            else if ((a >= 33 && a <= 36) || (a >= 93 && a <= 96)) T.attr = C_ACCENT;
+        }
+        break;
+    default:
+        break; /* cursor up/down, modes: no effect in a line-based view */
+    }
+}
+
+/* pty output callback (runs in the writer's system call, under the BKL). */
+static void pty_output(void *ctx, const char *data, size_t len)
 {
     UNUSED(ctx);
-    int i = partial_slot(pid);
     size_t c = (size_t)cols();
     for (size_t k = 0; k < len; k++) {
         char ch = data[k];
-        if (ch == '\n') {
-            if (T.partial[i].n == 0)
-                push_line("", 0, C_TEXT);
-            else
-                flush_partial(i);
+        if (T.esc == 1) {
+            if (ch == '[') {
+                T.esc = 2;
+                T.ncsi = 0;
+                memset(T.csi, 0, sizeof T.csi);
+            } else {
+                T.esc = 0;
+            }
             continue;
         }
-        if (ch == '\r')
+        if (T.esc == 2) {
+            if (ch >= '0' && ch <= '9') {
+                if (T.ncsi == 0)
+                    T.ncsi = 1;
+                T.csi[T.ncsi - 1] = T.csi[T.ncsi - 1] * 10 + (ch - '0');
+            } else if (ch == ';') {
+                if (T.ncsi == 0)
+                    T.ncsi = 1;
+                if (T.ncsi < 4)
+                    T.ncsi++;
+            } else if (ch >= 0x40 && ch <= 0x7e) {
+                csi_final(ch);
+                T.esc = 0;
+            }
             continue;
-        if (ch == '\t')
-            ch = ' ';
-        if ((unsigned char)ch < 32 || (unsigned char)ch > 126)
-            ch = '?';
-        T.partial[i].buf[T.partial[i].n++] = ch;
-        if (T.partial[i].n >= c || T.partial[i].n >= TERM_COLS)
-            flush_partial(i);
+        }
+        switch (ch) {
+        case 0x1b: T.esc = 1; break;
+        case '\n':
+            if (T.line_n == 0)
+                push_line("", 0, T.attr);
+            else
+                flush_line();
+            T.line_n = T.line_cur = 0;
+            break;
+        case '\r': T.line_cur = 0; break;
+        case '\b': if (T.line_cur) T.line_cur--; break;
+        case '\t':
+            do
+                put_char(' ', c);
+            while (T.line_cur % 8);
+            break;
+        case '\a': break;
+        default:
+            put_char((unsigned char)ch < 32 || (unsigned char)ch > 126 ? '?' : ch, c);
+            break;
+        }
     }
     T.scroll = 0;
     wm_invalidate(wm_get(T.win_id));
@@ -460,22 +551,55 @@ static void proc_output(void *ctx, int pid, const char *data, size_t len)
 static void proc_exited(void *ctx, int pid, const char *name, int status, const char *reason)
 {
     UNUSED(ctx);
-    for (int i = 0; i < 8; i++) {
-        if (T.partial[i].pid == pid) {
-            flush_partial(i);
-            T.partial[i].pid = 0;
+    if (pid == T.fg_pid) {
+        if (T.pty) {
+            char tmp[CMD_LINE_MAX * 2];
+            size_t n = pty_take_unread(T.pty, tmp, sizeof tmp);
+            /* The unfinished part was echoed onto the current output line;
+             * it will be shown again as Terminal input, so drop the echo. */
+            size_t last = n;
+            while (last > 0 && tmp[last - 1] != '\n')
+                last--;
+            size_t tail = n - last;
+            if (tail && T.line_n >= tail && !memcmp(T.line + T.line_n - tail, tmp + last, tail)) {
+                T.line_n -= tail;
+                if (T.line_cur > T.line_n)
+                    T.line_cur = T.line_n;
+            }
+            if (T.pend_off == T.pend_n)
+                T.pend_off = T.pend_n = 0;
+            for (size_t i = 0; i < n && T.pend_n < sizeof T.pending; i++)
+                T.pending[T.pend_n++] = tmp[i];
         }
+        flush_line();
+        T.fg_pid = 0;
+        if (T.pty)
+            T.pty->fg_pgrp = 0;
     }
     if (reason && reason[0])
         outf(C_ERROR, "[%s (pid %d) %s]", name, pid, reason);
+    else if ((status & 0x7f) == 0)
+        outf(C_DIM, "[%s (pid %d) exited with status %d]", name, pid, (status >> 8) & 0xff);
     else
-        outf(C_DIM, "[%s (pid %d) exited with status %d]", name, pid, status);
-    if (pid == T.fg_pid)
-        T.fg_pid = 0;
+        outf(C_ERROR, "[%s (pid %d) killed by signal %d]", name, pid, status & 0x7f);
     wm_invalidate(wm_get(T.win_id));
 }
 
-static const struct proc_console term_console = { proc_output, proc_exited, NULL };
+static const struct proc_watch term_watch = { proc_exited, NULL };
+static const struct pty_master term_master = { pty_output, NULL };
+
+static int visible_rows(void)
+{
+    struct window *w = wm_get(T.win_id);
+    return w ? MAX((w->content.h - 12) / 16, 1) : 24;
+}
+
+static struct pty *term_pty(void)
+{
+    if (!T.pty)
+        T.pty = pty_create(&term_master, (uint16_t)visible_rows(), (uint16_t)cols());
+    return T.pty;
+}
 
 static bool find_program(const char *name, char *path)
 {
@@ -491,8 +615,6 @@ static bool find_program(const char *name, char *path)
     return false;
 }
 
-static void join_args(int from, int argc, char **argv, char *out, size_t cap);
-
 static void run_program(int argc, char **argv, int first)
 {
     if (argc <= first) {
@@ -507,31 +629,50 @@ static void run_program(int argc, char **argv, int first)
         outf(C_ERROR, "run: %s: program not found (see ls /system/bin)", argv[first]);
         return;
     }
-    char args[AURORA_USER_ARGS_MAX];
-    join_args(first + 1, argc, argv, args, sizeof args);
-    int pid = process_spawn(path, args, &term_console, 0);
+    struct pty *pt = term_pty();
+    if (!pt) {
+        out_color(C_ERROR, "run: cannot create a terminal device (out of memory)");
+        return;
+    }
+    const char *av[CMD_MAX_ARGS + 1];
+    int n = 0;
+    for (int i = first; i < argc && n < CMD_MAX_ARGS; i++)
+        av[n++] = argv[i];
+    av[n] = NULL;
+    char pwd[VFS_PATH_MAX + 8];
+    k_snprintf(pwd, sizeof pwd, "PWD=%s", T.cwd);
+    const char *envp[] = { "PATH=/system/bin", "HOME=/home", "TERM=vt100", "USER=root", "SHELL=/system/bin/sh",
+                           pwd, NULL };
+    int prev_fg = pt->fg_pgrp;
+    struct proc_start ps = { .path = path, .argv = av, .envp = envp, .tty = pt, .watch = &term_watch,
+                             .uid = 0, .gid = 0, .cwd = T.cwd };
+    int pid = process_start(&ps);
     if (pid < 0) {
         outf(C_ERROR, "run: %s: %s", argv[first], process_spawn_error(pid));
         return;
     }
-    if (background)
+    if (background) {
+        pt->fg_pgrp = prev_fg; /* keyboard signals stay with the foreground job */
         outf(C_DIM, "[%d] %s started in the background", pid, argv[first]);
-    else
+    } else {
         T.fg_pid = pid;
+        T.attr = T.line_color = C_TEXT;
+    }
 }
 
 static void cmd_ps(void)
 {
-    outf(C_ACCENT, "  PID  STATE    CPU ms  MEM KiB  SYSCALLS  NAME");
+    outf(C_ACCENT, "  PID  PPID  UID THR STATE    CPU ms  MEM KiB  SYSCALLS  NAME");
     int n = 0;
     for (int i = 0; i < MAX_PROCS; i++) {
         struct process *p = process_at(i);
         if (!p)
             continue;
-        uint64_t ms = p->task ? p->task->cpu_ticks * 1000 / PIT_TARGET_HZ : 0;
-        outf(C_TEXT, "%5d  %-7s %7llu  %7llu  %8llu  %s %s", p->pid, p->state == PROC_ZOMBIE ? "zombie" : "running",
-             (unsigned long long)ms, (unsigned long long)(p->user_pages * 4), (unsigned long long)p->syscalls,
-             p->name, p->args);
+        uint64_t ms = process_cpu_ticks(p) * 1000 / PIT_TARGET_HZ;
+        uint64_t kib = p->state == PROC_RUNNING ? mm_resident_pages(&p->mm) * 4 : 0;
+        outf(C_TEXT, "%5d %5d %4u %3d %-7s %7llu  %7llu  %8llu  %s %s", p->pid, p->parent, p->uid, p->nthreads,
+             p->state == PROC_ZOMBIE ? "zombie" : "running", (unsigned long long)ms, (unsigned long long)kib,
+             (unsigned long long)p->syscalls, p->name, p->args);
         n++;
     }
     if (!n)
@@ -561,8 +702,23 @@ static void cmd_kill(int argc, char **argv)
         outf(C_ERROR, "kill: %s: no such process", argv[1]);
 }
 
+/* Lines using shell syntax (pipes, redirection, lists, variables, globs)
+ * go to /system/bin/sh -c; the built-in commands do not interpret them. */
+static bool needs_shell(const char *line)
+{
+    for (const char *p = line; *p; p++)
+        if (strchr("|<>;$*", *p) || (p[0] == '&' && p[1] == '&'))
+            return true;
+    return false;
+}
+
 static void execute(const char *line)
 {
+    if (needs_shell(line)) {
+        char *argv[] = { "sh", "-c", (char *)line };
+        run_program(3, argv, 0);
+        return;
+    }
     struct cmdline cl;
     int r = cmdline_parse(line, &cl);
     if (r) {
@@ -818,16 +974,14 @@ static void render(struct window *w, struct surface *s)
     int c = cols();
     /* The prompt line(s) occupy the bottom of the history view. */
     char prompt[VFS_PATH_MAX + 16];
-    if (T.fg_pid && process_get(T.fg_pid)) {
-        /* A foreground program owns the input line; show its prompt. */
-        prompt[0] = '\0';
-        for (int i = 0; i < 8; i++)
-            if (T.partial[i].pid == T.fg_pid && T.partial[i].n)
-                k_snprintf(prompt, sizeof prompt, "%.*s", (int)MIN(T.partial[i].n, sizeof prompt - 1), T.partial[i].buf);
+    bool fg = T.fg_pid && process_get(T.fg_pid);
+    if (fg) {
+        /* A foreground program owns the input: show its current line. */
+        k_snprintf(prompt, sizeof prompt, "%.*s", (int)MIN(T.line_n, sizeof prompt - 1), T.line);
     } else
         k_snprintf(prompt, sizeof prompt, "aurora:%s$ ", T.cwd);
     size_t plen = strlen(prompt);
-    size_t total = plen + T.in_len;
+    size_t total = plen + (fg ? 0 : T.in_len);
     int prompt_rows = (int)(total / (size_t)c) + 1;
     int out_rows = rows - prompt_rows;
     int last = T.count - T.scroll;
@@ -848,8 +1002,9 @@ static void render(struct window *w, struct surface *s)
     /* prompt + input, wrapped */
     char full[VFS_PATH_MAX + 16 + CMD_LINE_MAX + 1];
     str_copy(full, prompt, sizeof full);
-    str_append(full, T.input, sizeof full);
-    size_t caret = plen + T.in_cur;
+    if (!fg)
+        str_append(full, T.input, sizeof full);
+    size_t caret = fg ? MIN(T.line_cur, plen) : plen + T.in_cur;
     bool focused = wm_focused() == w;
     for (int r = 0; r < prompt_rows; r++) {
         size_t off = (size_t)r * (size_t)c;
@@ -858,7 +1013,7 @@ static void render(struct window *w, struct surface *s)
         for (size_t i = 0; i < n; i++) {
             size_t idx = off + i;
             char ch[2] = { full[idx], 0 };
-            uint32_t col = idx < 7 ? t->term_prompt : idx < plen ? t->accent : t->term_text;
+            uint32_t col = fg ? color_of(T.line_color) : idx < 7 ? t->term_prompt : idx < plen ? t->accent : t->term_text;
             draw_text(s, FONT, x, y, ch, col);
             x += 8;
         }
@@ -904,47 +1059,60 @@ static void history_recall(int dir)
     T.in_len = T.in_cur = strlen(T.input);
 }
 
+/* While a program runs in the foreground, keys become terminal input. */
 static bool fg_key(struct window *w, const struct key_event *e)
 {
     if (!T.fg_pid)
         return false;
-    if (!process_get(T.fg_pid)) {
+    if (!process_get(T.fg_pid) || !T.pty) {
         T.fg_pid = 0;
         return false;
     }
-    if ((e->mods & MOD_CTRL) && e->key == KEY_CHAR && (e->ascii | 0x20) == 'c') {
-        out_color(C_DIM, "^C");
-        process_kill(T.fg_pid);
+    if (e->key == KEY_PGUP || e->key == KEY_PGDN)
+        return false; /* scrollback stays with the Terminal */
+    char seq[8];
+    size_t n = 0;
+    if ((e->mods & MOD_CTRL) && e->key == KEY_CHAR && (e->ascii | 0x20) == 'v') {
+        size_t len;
+        const char *clip = clipboard_get(&len);
+        size_t k = 0;
+        while (k < len && clip[k] != '\n' && clip[k] != '\r')
+            k++;
+        pty_input(T.pty, clip, k);
+        TEST_EVENT("TERM_PASTE added=%zu len=%zu", k, k);
         wm_invalidate(w);
         return true;
     }
-    if ((e->mods & MOD_CTRL) && e->key == KEY_CHAR && (e->ascii | 0x20) == 'd') {
-        process_input(T.fg_pid, "", 0, true);
-        return true;
-    }
-    if (e->key == KEY_ENTER) {
-        char line[CMD_LINE_MAX + 2];
-        /* Echo the program's pending prompt and the typed text as one line. */
-        int slot = -1;
-        for (int i = 0; i < 8; i++)
-            if (T.partial[i].pid == T.fg_pid && T.partial[i].n)
-                slot = i;
-        if (slot >= 0) {
-            char echo[TERM_COLS + CMD_LINE_MAX + 2];
-            k_snprintf(echo, sizeof echo, "%.*s%s", (int)T.partial[slot].n, T.partial[slot].buf, T.input);
-            T.partial[slot].n = 0;
-            out_color(C_TEXT, echo);
-        } else {
-            out_color(C_TEXT, T.input);
+    if ((e->mods & MOD_CTRL) && e->key == KEY_CHAR && e->ascii) {
+        char ch = (char)(e->ascii | 0x20);
+        if (ch >= 'a' && ch <= 'z')
+            seq[n++] = (char)(ch - 'a' + 1);
+        else if (e->ascii == '\\')
+            seq[n++] = 0x1c;
+    } else {
+        switch (e->key) {
+        case KEY_ENTER: seq[n++] = '\r'; break;
+        case KEY_BACKSPACE: seq[n++] = 0x7f; break;
+        case KEY_TAB: seq[n++] = '\t'; break;
+        case KEY_ESC: seq[n++] = 0x1b; break;
+        case KEY_UP: memcpy(seq, "\x1b[A", 3); n = 3; break;
+        case KEY_DOWN: memcpy(seq, "\x1b[B", 3); n = 3; break;
+        case KEY_RIGHT: memcpy(seq, "\x1b[C", 3); n = 3; break;
+        case KEY_LEFT: memcpy(seq, "\x1b[D", 3); n = 3; break;
+        case KEY_HOME: memcpy(seq, "\x1b[H", 3); n = 3; break;
+        case KEY_END: memcpy(seq, "\x1b[F", 3); n = 3; break;
+        case KEY_DELETE: memcpy(seq, "\x1b[3~", 4); n = 4; break;
+        case KEY_CHAR:
+            if (e->ascii)
+                seq[n++] = (char)e->ascii;
+            break;
+        default: break;
         }
-        k_snprintf(line, sizeof line, "%s\n", T.input);
-        process_input(T.fg_pid, line, strlen(line), false);
-        T.in_len = T.in_cur = 0;
-        T.input[0] = '\0';
-        wm_invalidate(w);
-        return true;
     }
-    return false; /* ordinary line editing keys fall through */
+    if (n)
+        pty_input(T.pty, seq, n);
+    wm_invalidate(w);
+    return true;
 }
 
 static void key(struct window *w, const struct key_event *e)
@@ -1042,8 +1210,33 @@ static void key(struct window *w, const struct key_event *e)
     wm_invalidate(w);
 }
 
+static void replay_pending(struct window *w)
+{
+    while (T.pend_off < T.pend_n) {
+        char c = T.pending[T.pend_off++];
+        if (T.fg_pid && T.pty) {
+            pty_input(T.pty, &c, 1); /* the next program gets the rest */
+            continue;
+        }
+        struct key_event e;
+        memset(&e, 0, sizeof e);
+        e.pressed = true;
+        if (c == '\n' || c == '\r') {
+            e.key = KEY_ENTER;
+        } else if ((unsigned char)c >= 32 && (unsigned char)c < 127) {
+            e.key = KEY_CHAR;
+            e.ascii = (uint8_t)c;
+        } else {
+            continue;
+        }
+        key(w, &e);
+    }
+}
+
 static void tick(struct window *w, uint64_t now)
 {
+    if (T.pend_off < T.pend_n)
+        replay_pending(w);
     bool on = (now / 500) % 2 == 0;
     if (wm_focused() != w)
         on = false;
@@ -1057,9 +1250,19 @@ static void destroyed(struct window *w)
 {
     UNUSED(w);
     T.win_id = 0;
+    if (T.pty) {
+        pty_master_close(T.pty); /* SIGHUP to the programs on it */
+        T.pty = NULL;
+    }
+    T.fg_pid = 0;
 }
 
-static void resized(struct window *w) { wm_invalidate(w); }
+static void resized(struct window *w)
+{
+    if (T.pty)
+        pty_set_winsize(T.pty, (uint16_t)visible_rows(), (uint16_t)cols());
+    wm_invalidate(w);
+}
 
 static const struct window_ops ops = {
     .render = render, .key = key, .tick = tick, .destroyed = destroyed, .resized = resized,

@@ -31,6 +31,7 @@ long tcp_recv(struct tcb *t, void *buf, uint64_t len, uint64_t timeout_ms);
 void tcp_close(struct tcb *t);
 int tcp_active_count(void);
 const char *tcp_state_name(const struct tcb *t);
+int tcp_poll(const struct tcb *t); /* bit 0 readable, 1 writable, 2 hung up */
 void tcp_describe(const struct tcb *t, char *buf, size_t cap);
 
 #endif

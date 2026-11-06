@@ -15,7 +15,7 @@
  * kernel lock (core/spinlock.h), which the scheduler drops while a task is
  * switched out. */
 
-#define MAX_TASKS 64
+#define MAX_TASKS 160
 #define SCHED_SLICE_TICKS 3 /* 12 ms at 250 Hz */
 
 enum task_state { TASK_UNUSED = 0, TASK_RUNNABLE, TASK_BLOCKED, TASK_DEAD };
@@ -45,7 +45,25 @@ struct task {
     uint32_t cpu_mask_seen; /* CPUs this task has run on (statistics) */
     int pin_cpu;         /* run only on this CPU (-1 = any) */
     bool no_bkl;         /* kernel task that never takes the BKL (tests) */
+    /* User threads (0.6) */
+    int tid;             /* thread id (the process id for the first thread) */
+    uint64_t fs_base;    /* user TLS pointer, loaded on every switch to the task */
+    uint64_t sigmask;    /* blocked signals (bit sig-1) */
+    uint64_t sigpending; /* signals sent to this thread */
+    uint64_t clear_tid;  /* user address zeroed and futex-woken at thread exit */
+    bool exiting;        /* the process is ending: leave at the next kernel exit */
+    bool in_sigsuspend;
+    uint64_t saved_mask; /* sigsuspend: mask to restore after the handler */
+    uint32_t sys_restart; /* system call number + 1 if it may be restarted (SA_RESTART) */
+    uint8_t fpu[512] __attribute__((aligned(16))); /* FXSAVE image of a user task */
 };
+
+/* FPU/SSE state (fxsave layout). The kernel itself never touches these
+ * registers (-mgeneral-regs-only), so user state stays live in the CPU from
+ * the switch into a task until the switch out of it. */
+void fpu_init_state(uint8_t *area);
+static inline void fpu_save(uint8_t *area) { __asm__ volatile("fxsave64 (%0)" : : "r"(area) : "memory"); }
+static inline void fpu_restore(const uint8_t *area) { __asm__ volatile("fxrstor64 (%0)" : : "r"(area) : "memory"); }
 
 void sched_init(void);   /* turns the boot context into task 0 ("desktop") */
 void sched_init_ap(void); /* creates this AP's idle task and enters it */
@@ -68,6 +86,11 @@ void sched_wake(struct task *t);
 /* Wait queues identified by any stable pointer. */
 bool sched_wait_on(const void *obj, uint64_t timeout_ms);
 void sched_wake_all(const void *obj);
+/* Wakes at most n tasks waiting on obj; returns how many (futex). */
+int sched_wake_n(const void *obj, int n);
+/* If t is running on another CPU, interrupts that CPU so t passes through
+ * the kernel (signal delivery) soon. */
+void sched_kick(struct task *t);
 
 /* Called from the timer IRQ. */
 void sched_tick(void);
