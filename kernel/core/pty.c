@@ -289,11 +289,25 @@ long pty_write(struct process *p, struct pty *t, uint64_t ubuf, uint64_t len)
     uint64_t done = 0;
     while (done < len) {
         uint64_t n = MIN(len - done, (uint64_t)sizeof buf);
+        /* A user-space master: wait until it can take the chunk (ONLCR may
+         * double it). */
+        while (t->master_open && t->master.room && t->master.room(t->master.ctx) < 2 * n) {
+            if (task_interrupted(sched_current()))
+                return done ? (long)done : AE_INTR;
+            uint64_t f = irq_save();
+            if (t->master_open && t->master.room && t->master.room(t->master.ctx) < 2 * n)
+                sched_wait_on(&t->master, 0);
+            irq_restore(f);
+        }
+        if (!t->master_open)
+            return done ? (long)done : AE_IO;
+        if (!user_range_ok(p, ubuf + done, n, false))
+            return done ? (long)done : AE_FAULT;
         memcpy(buf, src + done, n);
         out_bytes(t, buf, n);
         done += n;
     }
-    sched_wake(sched_desktop());
+
     return (long)len;
 }
 
@@ -359,7 +373,173 @@ long pty_ioctl(struct process *p, struct pty *t, uint64_t req, uint64_t arg)
         int32_t n = (int32_t)in_count(t);
         return copy_to_user(p, arg, &n, sizeof n);
     }
+    case AURORA_TIOCSCTTY:
+        /* A session leader without a terminal adopts this one. */
+        if (p->sid != p->pid || (p->tty && p->tty != t))
+            return AE_PERM;
+        proc_set_ctty(p, t);
+        t->sid = p->sid;
+        t->fg_pgrp = p->pgid;
+        return 0;
     default:
         return AE_NOTTY;
     }
+}
+
+/* ---- user-space masters ------------------------------------------------------ */
+
+struct ptm {
+    struct pty *t;
+    char buf[PTM_OUT_CAP];
+    uint32_t r, w;
+    uint64_t dropped;
+};
+
+static void ptm_output(void *ctx, const char *data, size_t len)
+{
+    struct ptm *m = ctx;
+    for (size_t i = 0; i < len; i++) {
+        if (m->w - m->r >= PTM_OUT_CAP) {
+            m->dropped += len - i; /* only echo can overrun: writes wait for room */
+            break;
+        }
+        m->buf[m->w++ % PTM_OUT_CAP] = data[i];
+    }
+    sched_wake_all(m);
+    file_poll_wake();
+}
+
+static size_t ptm_room(void *ctx)
+{
+    struct ptm *m = ctx;
+    return PTM_OUT_CAP - (m->w - m->r);
+}
+
+struct file *ptm_open(int *err)
+{
+    struct ptm *m = kzalloc(sizeof *m);
+    struct file *f = file_new(FK_PTM, AURORA_O_RDWR);
+    struct pty_master pm = { ptm_output, m, ptm_room };
+    struct pty *t = m && f ? pty_create(&pm, 24, 80) : NULL;
+    if (!t) {
+        if (m) kfree(m);
+        if (f) kfree(f);
+        *err = AE_NOMEM;
+        return NULL;
+    }
+    m->t = t;
+    f->pty = t;
+    return f;
+}
+
+static struct ptm *ptm_of(struct file *f) { return f->pty ? (struct ptm *)f->pty->master.ctx : NULL; }
+
+long ptm_read(struct process *p, struct file *f, uint64_t ubuf, uint64_t len)
+{
+    struct ptm *m = ptm_of(f);
+    if (!m)
+        return AE_IO;
+    if (len == 0)
+        return 0;
+    for (;;) {
+        uint32_t avail = m->w - m->r;
+        if (avail) {
+            uint64_t n = MIN(len, (uint64_t)avail);
+            if (!user_range_ok(p, ubuf, n, true))
+                return AE_FAULT;
+            char *dst = (char *)(uintptr_t)ubuf;
+            for (uint64_t i = 0; i < n; i++)
+                dst[i] = m->buf[m->r++ % PTM_OUT_CAP];
+            sched_wake_all(&f->pty->master); /* writers waiting for room */
+            file_poll_wake();
+            return (long)n;
+        }
+        if (f->flags & AURORA_O_NONBLOCK)
+            return AE_AGAIN;
+        if (task_interrupted(sched_current()))
+            return AE_INTR;
+        uint64_t fl = irq_save();
+        if (m->w == m->r)
+            sched_wait_on(m, 0);
+        irq_restore(fl);
+    }
+}
+
+long ptm_write(struct process *p, struct file *f, uint64_t ubuf, uint64_t len)
+{
+    if (!f->pty)
+        return AE_IO;
+    char buf[256];
+    for (uint64_t done = 0; done < len;) {
+        uint64_t n = MIN(len - done, (uint64_t)sizeof buf);
+        int r = copy_from_user(p, buf, ubuf + done, n);
+        if (r)
+            return done ? (long)done : r;
+        pty_input(f->pty, buf, n);
+        done += n;
+    }
+    return (long)len;
+}
+
+long ptm_ioctl(struct process *p, struct file *f, uint64_t req, uint64_t arg)
+{
+    struct pty *t = f->pty;
+    switch (req) {
+    case AURORA_TIOCOPENSLAVE: {
+        struct file *s = file_new(FK_TTY, AURORA_O_RDWR);
+        if (!s)
+            return AE_NOMEM;
+        s->pty = t;
+        pty_ref(t);
+        int fd = proc_fd_install(p, s, 0, false);
+        if (fd < 0)
+            file_put(s);
+        return fd;
+    }
+    case AURORA_TIOCTAKEUNREAD: {
+        struct aurora_buf b;
+        int r = copy_from_user(p, &b, arg, sizeof b);
+        if (r)
+            return r;
+        static char tmp[PTY_IN_CAP + PTY_LINE_CAP]; /* BKL held */
+        size_t n = pty_take_unread(t, tmp, MIN((size_t)b.len, sizeof tmp));
+        if (n && copy_to_user(p, b.ptr, tmp, n))
+            return AE_FAULT;
+        return (long)n;
+    }
+    case AURORA_TIOCGWINSZ:
+    case AURORA_TIOCSWINSZ:
+    case AURORA_TCGETS:
+    case AURORA_TIOCGPGRP:
+        return pty_ioctl(p, t, req, arg);
+    case AURORA_FIONREAD: {
+        struct ptm *m = ptm_of(f);
+        int32_t n = m ? (int32_t)(m->w - m->r) : 0;
+        return copy_to_user(p, arg, &n, sizeof n);
+    }
+    default:
+        return AE_NOTTY;
+    }
+}
+
+int ptm_poll(struct file *f, int events)
+{
+    struct ptm *m = ptm_of(f);
+    int r = AURORA_POLLOUT;
+    if (m && m->w != m->r)
+        r |= AURORA_POLLIN;
+    return r & events;
+}
+
+void ptm_close(struct file *f)
+{
+    struct pty *t = f->pty;
+    if (!t)
+        return;
+    struct ptm *m = t->master.ctx;
+    t->master.room = NULL;
+    sched_wake_all(&t->master);
+    pty_master_close(t); /* drops the master's reference */
+    kfree(m);
+    f->pty = NULL;
 }

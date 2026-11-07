@@ -1,17 +1,18 @@
-Aurora OS 0.1.0
-Architecture: x86-64 (single CPU), QEMU "pc" reference machine.
+Aurora OS 0.7
+Architecture: x86-64 (1 to 16 CPUs), QEMU "pc" reference machine.
 Boot: Limine 12.9.3, Limine boot protocol base revision 6, UEFI or BIOS.
 
 Kernel: freestanding C11, higher-half, own GDT/IDT, bitmap physical page
-allocator, 4-level page tables with W^X and NX, bounded kernel heap,
-8259 PIC + PIT timer, PS/2 keyboard and mouse.
+allocator, 4-level page tables with W^X and NX, SMP with a big kernel
+lock, preemptive user processes with fork/exec, signals, threads, pipes,
+pseudo-terminals, shared memory and local message sockets.
 
-Desktop: software compositor with damage tracking, window manager,
-menu bar, dock, built-in Terminal, Files, Notes and Settings.
+Desktop: a user-space display server (software compositor with damage
+tracking, server-side decorations, a separate cursor layer, clipboard,
+keymaps) and Terminal, Files, Notes and Settings as separate processes.
+Text is TrueType (DejaVu) rendered with stb_truetype.
 
-Limitations of release 0.1:
-- Apps are built into one kernel address space. They are not isolated
-  processes and a fault in an app stops the whole system.
-- /home is a RAM filesystem: files are stored in memory and reset when
-  Aurora restarts. /system is read-only.
-- No networking, audio, USB, SMP, persistent storage or user accounts.
+Limitations:
+- /home lives on a virtio data disk when one is attached; otherwise it is
+  a RAM filesystem that resets when Aurora restarts. /system is read-only.
+- No audio or USB, one monitor, no GPU acceleration. Tested only in QEMU.

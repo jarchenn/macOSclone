@@ -37,6 +37,9 @@ bool vmm_map_fresh(uint64_t va, size_t bytes);
 uint64_t vmm_translate(uint64_t va);
 /* Maps device memory (uncached) into the MMIO window; NULL on failure. */
 void *vmm_map_mmio(phys_addr_t pa, size_t bytes, bool writable);
+/* Extends the framebuffer's direct-map window (same cache type as at boot)
+ * to cover [pa, pa + bytes) for larger display modes. */
+bool vmm_map_framebuffer(phys_addr_t pa, size_t bytes);
 /* Diagnostics: one kernel test page (TLB shootdown test). */
 uint64_t vmm_test_page_map(void);
 void vmm_test_page_unmap(bool shootdown);

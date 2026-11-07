@@ -26,6 +26,13 @@ enum file_kind {
     FK_ZERO,    /* /dev/zero */
     FK_RANDOM,  /* /dev/urandom */
     FK_TTY,     /* pseudo-terminal slave */
+    FK_SHM,     /* shared-memory object (0.7) */
+    FK_LOCAL,   /* connected local message socket (0.7) */
+    FK_LISTEN,  /* listening local socket (0.7) */
+    FK_DISPLAY, /* /dev/display (0.7) */
+    FK_INPUT,   /* /dev/input (0.7) */
+    FK_PTM,     /* pseudo-terminal master from /dev/ptmx (0.7) */
+    FK_CONSOLE, /* /dev/console: writes go to the kernel log (0.7) */
 };
 
 struct pipe {
@@ -36,6 +43,9 @@ struct pipe {
 
 struct pty;
 struct process;
+struct shm_obj;
+struct local_end;
+struct local_listener;
 
 struct file {
     int refs;
@@ -43,7 +53,10 @@ struct file {
     uint32_t flags; /* AURORA_O_ACCMODE | O_APPEND | O_NONBLOCK */
     int handle;     /* VFS handle or socket */
     struct pipe *pipe;
-    struct pty *pty;
+    struct pty *pty;               /* FK_TTY, FK_PTM */
+    struct shm_obj *shm;           /* FK_SHM */
+    struct local_end *lend;        /* FK_LOCAL */
+    struct local_listener *llisten;/* FK_LISTEN */
     uint32_t dir_index;
     uint64_t ino;
     char path[VFS_PATH_MAX + 1]; /* directory path (FK_DIR) / file path */
@@ -68,6 +81,7 @@ long file_ioctl(struct process *p, struct file *f, uint64_t req, uint64_t arg);
  * (plus HUP/ERR, which are always reported). */
 int file_poll(struct file *f, int events);
 bool file_is_socket(const struct file *f);
+struct file *file_shm_create(uint64_t bytes, int *err);
 
 /* Woken whenever a pipe, pty or descriptor changes state (poll/select). */
 extern int g_poll_wq;

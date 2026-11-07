@@ -55,10 +55,12 @@ void kbd_decoder_init(struct kbd_decoder *d);
 bool kbd_decode(struct kbd_decoder *d, uint8_t byte, struct key_event *out);
 uint8_t kbd_mods(const struct kbd_decoder *d);
 
-/* Standard 3-byte PS/2 mouse packets (no wheel mode negotiated). */
+/* PS/2 mouse packets: 3 bytes, or 4 once IntelliMouse (wheel) mode is
+ * negotiated (set `size` to 4). */
 struct mouse_decoder {
-    uint8_t pkt[3];
+    uint8_t pkt[4];
     uint8_t idx;
+    uint8_t size;
     uint64_t last_ms;
     uint32_t resyncs, overflows;
 };
@@ -67,10 +69,24 @@ void mouse_decoder_init(struct mouse_decoder *d);
 /* now_ms is used to drop partial packets older than 50 ms (resync). */
 bool mouse_decode(struct mouse_decoder *d, uint8_t byte, uint64_t now_ms, struct mouse_event *out);
 
+/* Scan code set 1 extractor for /dev/input (0.7): yields the physical key
+ * (0xE0-prefixed codes as 0x100 | code) and whether it went down. Skips the
+ * Pause sequence, the fake shifts around Print Screen and controller
+ * replies. Portable (host-tested). */
+struct kbd_scanner {
+    bool e0;
+    uint8_t e1_skip;
+};
+void kbd_scanner_init(struct kbd_scanner *s);
+bool kbd_scan(struct kbd_scanner *s, uint8_t byte, uint16_t *code, bool *pressed);
+
 /* Kernel PS/2 driver (ps2.c) */
 bool ps2_init(void);
 bool ps2_has_mouse(void);
-/* Updates the keyboard LEDs (Caps Lock). Bounded waits; safe to fail. */
+bool ps2_mouse_has_wheel(void);
+/* Updates the keyboard LEDs (bit 0 Scroll, 1 Num, 2 Caps). Bounded waits;
+ * safe to fail. */
+void ps2_set_led_bits(uint8_t bits);
 void ps2_set_leds(bool caps);
 uint32_t ps2_led_updates(void);
 struct byte_ring *ps2_kbd_ring(void);

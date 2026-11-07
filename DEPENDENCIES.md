@@ -11,7 +11,7 @@ emulator) as permitted by the project brief.
 |---|---|---|---|---|---|
 | Limine bootloader (binary release) | **12.9.3** (released 2026-10-06) | https://github.com/limine-bootloader/limine/releases/download/v12.9.3/limine-binary.zip | SHA-256 `1bdbbcda650c5dba9b1eca5833d598137bf11bd6289bc89b6bcc4f8f112fa676` (checked by `tools/fetch_deps.py`) | BSD-2-Clause (`third_party/limine-12.9.3/LICENSE`, copied into `make dist` as `image/LIMINE-LICENSE.txt`) | `BOOTX64.EFI` (UEFI), `limine-bios.sys` + `limine bios-install` (BIOS) |
 | Limine protocol header `limine.h` | limine-protocol commit `3a0526b700e356f0eac1b71a77697b3fd1c707a3` (2026-09-26, last protocol commit before 12.9.3) | https://github.com/limine-bootloader/limine-protocol | SHA-256 `0aadf2633c85d8cb145344c968add158aeb1deb68af567d55ba8431c492b6d4c` (vendored at `kernel/include/limine.h`) | 0BSD | Request/response structures, base revision 6 |
-| Spleen bitmap font | **2.2.0** | https://github.com/fcambus/spleen (tag `2.2.0`): `spleen-8x16.bdf`, `spleen-12x24.bdf` | SHA-256 8x16 `4a3d97ee61a8c86a7525d8c723cb8a14081f395cd2feb4227ba5e3baf0629bae`, 12x24 `181989f2c5f47b34c2474cd424b387b0002aa77fc970e59ee31e16733af24687` | BSD-2-Clause (`assets/licenses/spleen-LICENSE.txt`) | All UI text, converted to C at build time by `tools/gen_assets.py` |
+| Spleen bitmap font | **2.2.0** | https://github.com/fcambus/spleen (tag `2.2.0`): `spleen-8x16.bdf`, `spleen-12x24.bdf` | SHA-256 8x16 `4a3d97ee61a8c86a7525d8c723cb8a14081f395cd2feb4227ba5e3baf0629bae`, 12x24 `181989f2c5f47b34c2474cd424b387b0002aa77fc970e59ee31e16733af24687` | BSD-2-Clause (`assets/licenses/spleen-LICENSE.txt`) | Kernel console text; since 0.7 the desktop's fallback when a TrueType font cannot be loaded. Converted to C at build time by `tools/gen_assets.py` |
 
 The Limine host utility (`limine bios-install`) is **compiled from the
 `limine.c` source shipped in the verified release** with the host C
@@ -69,3 +69,18 @@ no newlib or Lua source file is modified.
 Aurora's own code linked into user programs: the libc OS layer
 (`user/libc/src`), the shell and utilities (`user/bin`), and
 `kernel/lib/crc32.c`.
+
+## Since 0.7: fonts and the TrueType rasterizer
+
+Linked into (stb_truetype) or read by (DejaVu) the desktop programs; license
+texts are installed under `/system/licenses/`. Neither project publishes a
+digest next to its download, so each is pinned to the SHA-256 of the file
+downloaded and inspected on 2026-11-06 (`tools/fetch_deps.py` refuses any
+other content).
+
+| Component | Version | Source | Integrity | License | Used for |
+|---|---|---|---|---|---|
+| stb_truetype.h | **1.26**, commit `6e9f34d5429cf16790ec43c9bac3f1ee4ad1f760` (last commit touching the file) | https://raw.githubusercontent.com/nothings/stb/6e9f34d5429cf16790ec43c9bac3f1ee4ad1f760/stb_truetype.h | SHA-256 `ecd30b05e0dd4fea3a13c26810dd9e1992dc379049482c393d5a19e6b5090aab` | Public domain (Unlicense), MIT alternative (`/system/licenses/stb_truetype-LICENSE.txt`) | TrueType glyph rasterization in `user/gui/common/text.c` |
+| DejaVu fonts | **2.37** | https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.tar.bz2 | SHA-256 `fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7` | Bitstream Vera / DejaVu changes public domain (`/system/licenses/dejavu-LICENSE.txt`) | `DejaVuSans.ttf`, `DejaVuSans-Bold.ttf`, `DejaVuSansMono.ttf` in `/system/fonts` |
+
+The keymaps (`initramfs/system/keymaps`) and the desktop code are original.

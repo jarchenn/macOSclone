@@ -14,6 +14,9 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <stdbool.h>
+#include <aurora.h>
 
 static int passed, total;
 
@@ -123,9 +126,39 @@ static void test_mmap(void)
     ok = ok && mprotect(p, len, PROT_READ) == 0 && p[100] == 100;
     ok = ok && munmap(p, len) == 0;
     check("mmap/mprotect/munmap anonymous", ok);
+    /* 0.7: shared memory. An anonymous shared mapping is shared with a
+     * forked child; two mappings of one shm object see the same bytes;
+     * files still cannot be mapped shared. */
+    volatile uint32_t *sh = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    bool shared = sh != MAP_FAILED;
+    if (shared) {
+        sh[0] = 1;
+        pid_t pid = fork();
+        if (pid == 0) {
+            sh[0] = 0xC0FFEE;
+            _exit(0);
+        }
+        int st = 0;
+        shared = pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && sh[0] == 0xC0FFEE;
+        munmap((void *)sh, 4096);
+    }
+    int sfd = aurora_shm_create(8192, O_CLOEXEC);
+    uint8_t *m1 = sfd >= 0 ? mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, sfd, 0) : MAP_FAILED;
+    uint8_t *m2 = sfd >= 0 ? mmap(NULL, 8192, PROT_READ, MAP_SHARED, sfd, 0) : MAP_FAILED;
+    if (m1 != MAP_FAILED && m2 != MAP_FAILED) {
+        m1[5000] = 0x5A;
+        shared = shared && m2[5000] == 0x5A && m1 != m2;
+    } else {
+        shared = false;
+    }
+    int ffd = open("/system/about.txt", O_RDONLY);
     errno = 0;
-    check("mmap MAP_SHARED is refused (ENOTSUP)",
-          mmap(NULL, 4096, PROT_READ, MAP_SHARED | MAP_ANONYMOUS, -1, 0) == MAP_FAILED && errno == ENOTSUP);
+    shared = shared && ffd >= 0 && mmap(NULL, 4096, PROT_READ, MAP_SHARED, ffd, 0) == MAP_FAILED && errno == ENOTSUP;
+    if (ffd >= 0)
+        close(ffd);
+    if (sfd >= 0)
+        close(sfd);
+    check("mmap MAP_SHARED: fork-shared anonymous, shm object twice, files refused", shared);
 }
 
 /* ---- threads ---------------------------------------------------------------- */

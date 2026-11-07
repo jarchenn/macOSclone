@@ -26,6 +26,37 @@ static const char upper[128] = {
     [0x37] = '*', [0x4A] = '-', [0x4E] = '+',
 };
 
+void kbd_scanner_init(struct kbd_scanner *s) { memset(s, 0, sizeof *s); }
+
+bool kbd_scan(struct kbd_scanner *s, uint8_t b, uint16_t *code, bool *pressed)
+{
+    if (s->e1_skip) {
+        s->e1_skip--;
+        return false;
+    }
+    if (b == 0xE1) {
+        s->e1_skip = 5; /* Pause: E1 1D 45 E1 9D C5, no release */
+        s->e0 = false;
+        return false;
+    }
+    if (b == 0xE0) {
+        s->e0 = true;
+        return false;
+    }
+    if (b == 0xFA || b == 0xFE || b == 0xEE || b == 0x00 || b == 0xFF) {
+        s->e0 = false; /* ACK, resend, echo, errors */
+        return false;
+    }
+    bool e0 = s->e0;
+    s->e0 = false;
+    uint8_t c = b & 0x7F;
+    if (e0 && (c == 0x2A || c == 0x36))
+        return false; /* fake shifts around Print Screen and friends */
+    *code = (uint16_t)((e0 ? 0x100 : 0) | c);
+    *pressed = !(b & 0x80);
+    return true;
+}
+
 void kbd_decoder_init(struct kbd_decoder *d) { memset(d, 0, sizeof *d); }
 
 uint8_t kbd_mods(const struct kbd_decoder *d)

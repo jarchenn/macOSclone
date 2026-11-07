@@ -95,19 +95,46 @@ Deferred by the roadmap: dynamic linking, shared memory, job control,
 multiple terminals, Linux ABI compatibility. Still open from 0.5: user page
 faults are resolved under the BKL (D-0.6-6).
 
-## 0.7 and later
+## 0.7: Desktop maturity (done)
 
-Not started. 0.7 (desktop maturity) needs shared-memory surfaces first; 0.8
-needs a physical reference machine. These are tracked against the roadmap
-document's acceptance tests.
+The 0.2 deferral is resolved first: the desktop leaves the kernel
+(D-0.7-1). Then the nine sub-milestones:
+
+* 0.7a compositor rework: shared-memory buffers with attach/commit/release
+  (D-0.7-4), local message sockets with descriptor passing (D-0.7-3),
+  damage per window, z-order, focus, a separate cursor layer, 16 ms frame
+  pacing; scan-out by the kernel (D-0.7-2).
+* 0.7b text: stb_truetype + DejaVu, glyph cache per size, linear-light
+  blending, kerning, UTF-8, Spleen fallback, measuring and line breaking
+  (D-0.7-6).
+* 0.7c window management: configure/redraw/acknowledge resize, minimum and
+  maximum sizes, maximize/minimize, server-side decorations, Alt+Tab.
+* 0.7d toolkit: label, button, field, list, scroll view, menu; event loop,
+  timers, descriptor watches.
+* 0.7e clipboard in the display server (survives the source app).
+* 0.7f open/save dialogs (folders, New Folder, overwrite confirmation).
+* 0.7g input: keymap files (US, US-International with dead keys),
+  configurable repeat, LEDs, wheel, text events separate from key events.
+* 0.7h graphics modes: runtime resolution changes via Bochs DISPI
+  (D-0.7-5); windows re-laid out. Integer 2x scaling (optional) not done.
+* 0.7i core apps on the toolkit: Notes (editor), Files, Settings (theme,
+  resolution, layout, repeat), Terminal (now a `/dev/ptmx` client).
+
+Acceptance: `make desktop` (10 scenarios, golden screenshots in
+`tests/golden/`), plus every earlier suite, at `-smp 1` and `-smp 4`.
+
+## 0.8 and later
+
+Not started. 0.8 needs a physical reference machine, which the agent that
+builds Aurora cannot test on.
 
 ## Later items (from the 0.1 roadmap)
 
 | Item | Status |
 |---|---|
-| Window resizing | **done**: drag the lower-right grip; an outline shows the new size; minimum 320×180 (`window-resize`) |
+| Window resizing | **done**: drag the lower-right grip; an outline shows the new size; since 0.7 apps set their own minimum (Notes 200×150) (`window-resize`) |
 | Delete/rename in the VFS | **done**: `vfs_remove` and `vfs_rename`; Terminal `rm` and `mv`; persisted on disk |
-| Clipboard | **done** (text): Notes selection with Shift+arrows, mouse drag and double-click; Ctrl+A/C/X/V; Terminal Ctrl+V pastes the first line. Guest-tested, including double-click and drag selection (`clipboard-copy-paste`). The clipboard is a kernel buffer, not a service |
+| Clipboard | **done** (text): Notes selection with Shift+arrows, mouse drag and double-click; Ctrl+A/C/X/V; Terminal Ctrl+V pastes the first line. Guest-tested, including double-click and drag selection (`clipboard-copy-paste`). Since 0.7 the clipboard is kept by the display server |
 | Keyboard LEDs | **done**: Caps Lock LED (`caps-lock-led`); Num Lock and Scroll Lock are not tracked |
 | ACPI power-off | **done**: RSDP → RSDT/XSDT → FADT → `\_S5` found by a byte scan of the DSDT (no AML interpreter); Shut Down menu item and `poweroff`; syncs `/home` first (`acpi-poweroff`) |
 | Keyboard layouts | not started (US only); planned for 0.7g |

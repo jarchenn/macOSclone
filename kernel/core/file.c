@@ -9,6 +9,10 @@
 #include "arch/cpu.h"
 #include "arch/x86_64/io.h"
 #include "net/net.h"
+#include "core/local.h"
+#include "drivers/display.h"
+#include "drivers/input_dev.h"
+#include "memory/uvm.h"
 #include "kalloc.h"
 #include "lib.h"
 
@@ -60,6 +64,24 @@ void file_put(struct file *f)
     case FK_TTY:
         pty_put(f->pty);
         break;
+    case FK_PTM:
+        ptm_close(f);
+        break;
+    case FK_SHM:
+        shm_put(f->shm);
+        break;
+    case FK_LOCAL:
+        local_end_close(f->lend);
+        break;
+    case FK_LISTEN:
+        local_listener_close(f->llisten);
+        break;
+    case FK_DISPLAY:
+        display_close(f);
+        break;
+    case FK_INPUT:
+        input_dev_close(f);
+        break;
     default:
         break;
     }
@@ -68,6 +90,23 @@ void file_put(struct file *f)
 }
 
 bool file_is_socket(const struct file *f) { return f && f->kind == FK_SOCKET; }
+
+struct file *file_shm_create(uint64_t bytes, int *err)
+{
+    struct shm_obj *o = shm_create(bytes);
+    if (!o) {
+        *err = bytes > SHM_MAX || bytes == 0 ? AE_INVAL : AE_NOMEM;
+        return NULL;
+    }
+    struct file *f = file_new(FK_SHM, AURORA_O_RDWR);
+    if (!f) {
+        shm_put(o);
+        *err = AE_NOMEM;
+        return NULL;
+    }
+    f->shm = o;
+    return f;
+}
 
 int file_pipe(struct file **rd, struct file **wr)
 {
@@ -111,6 +150,10 @@ static const struct { const char *path; uint8_t kind; uint32_t ino; } devices[] 
     { "/dev/urandom", FK_RANDOM, 3 },
     { "/dev/random", FK_RANDOM, 4 },
     { "/dev/tty", FK_TTY, 5 },
+    { "/dev/ptmx", FK_PTM, 6 },
+    { "/dev/display", FK_DISPLAY, 7 },
+    { "/dev/input", FK_INPUT, 8 },
+    { "/dev/console", FK_CONSOLE, 9 },
 };
 
 bool file_is_device_path(const char *path, struct aurora_stat *st)
@@ -151,11 +194,21 @@ struct file *file_open_device(struct process *p, const char *path, uint32_t flag
             pty_ref(p->tty);
             return f;
         }
-        struct file *f = file_new(devices[i].kind, flags);
-        if (!f)
+        struct file *f;
+        if (devices[i].kind == FK_PTM)
+            f = ptm_open(err);
+        else if (devices[i].kind == FK_DISPLAY)
+            f = p->uid == 0 ? display_open(err) : NULL;
+        else if (devices[i].kind == FK_INPUT)
+            f = p->uid == 0 ? input_dev_open(err) : NULL;
+        else if (!(f = file_new(devices[i].kind, flags)))
             *err = AE_NOMEM;
-        else
+        if (!f && (devices[i].kind == FK_DISPLAY || devices[i].kind == FK_INPUT) && p->uid != 0)
+            *err = AE_ACCES;
+        if (f) {
             f->ino = devices[i].ino;
+            f->flags = (f->flags & ~AURORA_O_ACCMODE) | (flags & (AURORA_O_ACCMODE | AURORA_O_NONBLOCK));
+        }
         return f;
     }
     *err = VFS_ENOENT;
@@ -303,7 +356,8 @@ long file_read(struct process *p, struct file *f, uint64_t ubuf, uint64_t len)
     case FK_DIR: return VFS_EISDIR;
     case FK_PIPE_R: return pipe_read(p, f, ubuf, len);
     case FK_SOCKET: return sock_read_user(p, f, ubuf, len);
-    case FK_NULL: return 0;
+    case FK_NULL:
+    case FK_CONSOLE: return 0;
     case FK_ZERO:
     case FK_RANDOM: {
         if (!user_range_ok(p, ubuf, len, true))
@@ -314,6 +368,9 @@ long file_read(struct process *p, struct file *f, uint64_t ubuf, uint64_t len)
         return (long)len;
     }
     case FK_TTY: return pty_read(p, f->pty, ubuf, len, (f->flags & AURORA_O_NONBLOCK) != 0);
+    case FK_PTM: return ptm_read(p, f, ubuf, len);
+    case FK_LOCAL: return local_recv(p, f, ubuf, len, 0, NULL, NULL, false);
+    case FK_INPUT: return input_dev_read(p, f, ubuf, len);
     default: return AE_BADF;
     }
 }
@@ -341,6 +398,22 @@ long file_write(struct process *p, struct file *f, uint64_t ubuf, uint64_t len)
     case FK_RANDOM:
         return user_range_ok(p, ubuf, len, false) ? (long)len : AE_FAULT;
     case FK_TTY: return pty_write(p, f->pty, ubuf, len);
+    case FK_PTM: return ptm_write(p, f, ubuf, len);
+    case FK_CONSOLE: {
+        /* The kernel log (serial): output of init and the display server. */
+        char buf[257];
+        for (uint64_t done = 0; done < len;) {
+            uint64_t n = MIN(len - done, (uint64_t)sizeof buf - 1);
+            int r = copy_from_user(p, buf, ubuf + done, n);
+            if (r)
+                return done ? (long)done : r;
+            buf[n] = 0;
+            klog_raw(buf);
+            done += n;
+        }
+        return (long)len;
+    }
+    case FK_LOCAL: return local_send(p, f, ubuf, len, NULL, 0, false);
     default: return AE_BADF;
     }
 }
@@ -416,8 +489,12 @@ int file_stat(struct file *f, struct aurora_stat *st)
         st->blksize = 4096;
         if (f->kind == FK_PIPE_R || f->kind == FK_PIPE_W)
             st->mode = AURORA_S_IFIFO | 0600;
-        else if (f->kind == FK_SOCKET)
+        else if (f->kind == FK_SOCKET || f->kind == FK_LOCAL || f->kind == FK_LISTEN)
             st->mode = AURORA_S_IFSOCK | 0600;
+        else if (f->kind == FK_SHM) {
+            st->mode = AURORA_S_IFREG | 0600;
+            st->size = f->shm->npages * 4096u;
+        }
         else
             st->mode = AURORA_S_IFCHR | 0620;
         return 0;
@@ -480,6 +557,12 @@ long file_ioctl(struct process *p, struct file *f, uint64_t req, uint64_t arg)
 {
     if (f->kind == FK_TTY)
         return pty_ioctl(p, f->pty, req, arg);
+    if (f->kind == FK_PTM)
+        return ptm_ioctl(p, f, req, arg);
+    if (f->kind == FK_DISPLAY)
+        return display_ioctl(p, f, req, arg);
+    if (f->kind == FK_INPUT)
+        return input_dev_ioctl(p, f, req, arg);
     if (req == AURORA_FIONREAD && (f->kind == FK_PIPE_R)) {
         int32_t n = (int32_t)(f->pipe->w - f->pipe->r);
         return copy_to_user(p, arg, &n, sizeof n);
@@ -509,6 +592,18 @@ int file_poll(struct file *f, int events)
     }
     case FK_TTY:
         r = pty_poll(f->pty, events);
+        break;
+    case FK_PTM:
+        r = ptm_poll(f, events);
+        break;
+    case FK_LOCAL:
+        r = local_poll_end(f->lend, events);
+        break;
+    case FK_LISTEN:
+        r = local_poll_listener(f->llisten, events);
+        break;
+    case FK_INPUT:
+        r = input_dev_poll(f, events);
         break;
     case FK_SOCKET: {
         int s = sock_poll(f->handle);

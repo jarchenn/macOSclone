@@ -461,10 +461,19 @@ static void set_tty(struct process *p, struct pty *t)
         pty_ref(t);
 }
 
+void proc_set_ctty(struct process *p, struct pty *t) { set_tty(p, t); }
+
 static void user_task_entry(void *arg)
 {
     struct interrupt_frame fr = *(struct interrupt_frame *)arg;
     kfree(arg);
+    /* The switch to this task loaded FS_BASE and the FPU state before it
+     * got the BKL, while the creator (fork, thread_create) may still have
+     * been filling them in on another CPU. Now that we hold the BKL the
+     * creator is done: load them again. */
+    struct task *self = sched_current();
+    fpu_restore(self->fpu);
+    wrmsr(MSR_FS_BASE, self->fs_base);
     bkl_release_all(); /* user mode never holds the BKL */
     cpu_cli();
     enter_user_frame(&fr);
@@ -547,6 +556,18 @@ static int create_process(const char *path, const struct argblock *a, struct pro
             }
             if (sa->flags & AURORA_SPAWN_SETPGROUP)
                 p->pgid = sa->pgroup ? sa->pgroup : p->pid;
+            if (sa->flags & AURORA_SPAWN_SETSID) {
+                p->sid = p->pgid = p->pid;
+                struct file *f0 = p->fds[0].f;
+                if (f0 && f0->kind == FK_TTY && f0->pty) {
+                    set_tty(p, f0->pty);
+                    f0->pty->sid = p->pid;
+                    if (!(sa->flags & AURORA_SPAWN_BACKGROUND))
+                        f0->pty->fg_pgrp = p->pid;
+                } else {
+                    set_tty(p, NULL);
+                }
+            }
             if (sa->flags & AURORA_SPAWN_SETSIGDEF)
                 for (int i = 1; i < AURORA_NSIG; i++)
                     if (sa->sigdefault & (1ull << (i - 1)))
@@ -846,7 +867,6 @@ static void teardown(struct process *p)
         signal_send(parent, AURORA_SIGCHLD);
         sched_wake_all(parent);
     }
-    sched_wake(sched_desktop());
 }
 
 static void remove_thread(struct process *p, struct task *t)

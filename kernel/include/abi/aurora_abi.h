@@ -98,7 +98,22 @@ enum aurora_syscall {
     SYS_UPTIME = 96,        /* () -> milliseconds since boot */
     SYS_SYSINFO = 97,       /* (struct aurora_sysinfo *) */
     SYS_UNAME = 98,         /* (struct aurora_utsname *) */
-    SYS_COUNT = 99,
+
+    /* 0.7: shared memory, local message sockets, test markers */
+    SYS_SHM_CREATE = 99,    /* (uint64 size, flags) -> fd; mmap it MAP_SHARED */
+    SYS_SOCKETPAIR = 100,   /* (int fds[2], flags): connected local message sockets */
+    SYS_LOCAL_LISTEN = 101, /* (const char *name, backlog, flags) -> listening fd */
+    SYS_LOCAL_CONNECT = 102,/* (const char *name, flags) -> connected fd */
+    SYS_ACCEPT = 103,       /* (fd, flags) -> connected fd */
+    SYS_SENDMSG = 104,      /* (fd, const struct aurora_msg *) -> bytes */
+    SYS_RECVMSG = 105,      /* (fd, struct aurora_msg *) -> bytes (0 = peer closed) */
+    SYS_TEST_EVENT = 106,   /* (const char *text, len): "@@text" on the serial log, test builds */
+    SYS_POWER = 107,        /* (how): 1 restart, 2 power off; root only; syncs /home first */
+    SYS_KLOG = 108,         /* (struct aurora_klog *): kernel log statistics and heap use */
+    SYS_CPUINFO = 109,      /* (struct aurora_cpus *) */
+    SYS_PROCLIST = 110,     /* (struct aurora_procs *) */
+    SYS_TESTOP = 111,       /* (op, arg, void *out): test builds only (TLB shootdown test) */
+    SYS_COUNT = 112,
 };
 
 /* errno values (negated in system call results). Identical to newlib. */
@@ -301,6 +316,11 @@ struct aurora_thread {
 #define AURORA_SPAWN_SETPGROUP 1
 #define AURORA_SPAWN_SETSIGMASK 2
 #define AURORA_SPAWN_SETSIGDEF 4
+/* 0.7: the child leads a new session; if its descriptor 0 is a terminal
+ * that becomes its controlling terminal and (unless BACKGROUND) the child's
+ * group the terminal's foreground group. */
+#define AURORA_SPAWN_SETSID 8
+#define AURORA_SPAWN_BACKGROUND 16
 struct aurora_spawn {
     uint32_t flags;
     int32_t pgroup;
@@ -340,6 +360,7 @@ struct aurora_timespec {
 #define AURORA_TIOCGWINSZ 0x5413
 #define AURORA_TIOCSWINSZ 0x5414
 #define AURORA_FIONREAD 0x541B
+#define AURORA_TIOCSCTTY 0x540E
 
 #define AURORA_NCCS 16
 struct aurora_termios {
@@ -401,8 +422,137 @@ struct aurora_sysinfo {
     uint32_t cpus, reserved;
 };
 
+struct aurora_klog {
+    uint64_t heap_used, heap_allocs, heap_mapped;
+    uint64_t input_events;
+    uint32_t display_owned, display_generation;
+    /* storage (the 0.3 VFS counters) */
+    uint64_t vfs_generation, pfs_commits, pfs_blocks_written;
+    uint32_t ram_bytes, ram_nodes, open_files;
+    uint32_t pfs_used_blocks, pfs_total_blocks, pfs_corrupt_files;
+    int32_t pfs_last_error;
+    uint8_t home_persistent;
+    uint8_t firmware; /* 1 BIOS, 2 UEFI (x86-64), 3 UEFI (32-bit) */
+    uint16_t reserved;
+    uint64_t heap_peak, heap_limit;
+    uint64_t usable_pages;
+    uint32_t kbd_dropped, mouse_dropped;
+    uint32_t sockets, reserved2;
+};
+
+#define AURORA_MAX_CPUS 16
+struct aurora_cpus {
+    uint32_t n, online;
+    uint64_t bkl_contended;
+    uint32_t lockdep_classes, lockdep_violations, lockdep_long_holds, reserved;
+    struct {
+        uint32_t index, apic_id, online, reserved;
+        uint64_t ticks, user_ticks, idle_ticks, kernel_ticks, switches, ipis, tlb_shootdowns;
+    } cpu[AURORA_MAX_CPUS];
+};
+
+#define AURORA_MAX_PROCS 64
+struct aurora_procs {
+    uint32_t n, reserved;
+    uint64_t context_switches;
+    char kernel_tasks[160];
+    struct {
+        int32_t pid, ppid;
+        uint32_t uid, nthreads, state; /* 1 running, 2 zombie */
+        uint32_t reserved;
+        uint64_t cpu_ms, mem_kib, syscalls;
+        char name[32];
+        char args[96];
+    } p[AURORA_MAX_PROCS];
+};
+
+#define AURORA_TESTOP_TLB 1 /* arg: 1 shootdown, 0 control run; out: int32[6] */
+
 struct aurora_utsname {
     char sysname[32], nodename[32], release[32], version[64], machine[32];
+};
+
+/* ---- 0.7: local message sockets ------------------------------------------
+ * Message-preserving (SOCK_SEQPACKET-like) and connection-oriented. A
+ * message carries up to AURORA_MSG_MAX bytes and up to AURORA_MSG_FDS
+ * descriptors; received descriptors are installed in the receiver (fds is
+ * then an array of nfds int32 that recvmsg fills). A message longer than
+ * the receive buffer is truncated (flags gets AURORA_MSG_TRUNC); extra
+ * descriptors are closed. Names live in a kernel namespace, not the VFS. */
+#define AURORA_MSG_MAX 65536u
+#define AURORA_MSG_FDS 8u
+#define AURORA_LOCAL_NAME_MAX 63u
+#define AURORA_MSG_TRUNC 1u
+#define AURORA_MSG_DONTWAIT 2u
+struct aurora_msg {
+    uint64_t buf;  /* bytes */
+    uint64_t len;
+    uint64_t fds;  /* int32 array */
+    uint32_t nfds; /* in: descriptors to send / room for received ones; out: received */
+    uint32_t flags;
+};
+
+/* ---- 0.7: devices ---------------------------------------------------------
+ * /dev/display (one opener at a time): the display server attaches a
+ * shared-memory XRGB8888 backbuffer and presents damaged rectangles; the
+ * kernel converts to the scan-out format. Mode setting through the Bochs
+ * display adapter (QEMU -vga std) when present. */
+#define AURORA_DISP_INFO 0x4401        /* struct aurora_display_info * */
+#define AURORA_DISP_SET_MODE 0x4402    /* struct aurora_display_mode * */
+#define AURORA_DISP_ATTACH 0x4403      /* struct aurora_display_attach * */
+#define AURORA_DISP_PRESENT 0x4404     /* struct aurora_display_present * */
+#define AURORA_DISP_MODES 16
+struct aurora_display_mode {
+    uint32_t width, height;
+};
+struct aurora_display_info {
+    uint32_t width, height;    /* current mode */
+    uint32_t can_set_mode;     /* 1 when SET_MODE works */
+    uint32_t nmodes;
+    uint32_t generation;       /* increments on every mode change */
+    uint32_t reserved;
+    struct aurora_display_mode modes[AURORA_DISP_MODES];
+};
+struct aurora_display_attach {
+    int32_t fd;                /* shared-memory object, or -1 to detach */
+    uint32_t width, height, stride; /* stride in pixels */
+};
+#define AURORA_DISP_RECTS 32
+struct aurora_display_rect {
+    int32_t x, y, w, h;
+};
+struct aurora_display_present {
+    uint32_t n;
+    uint32_t reserved;
+    struct aurora_display_rect r[AURORA_DISP_RECTS];
+};
+
+/* /dev/input (one opener at a time): fixed-size records. Keys carry PS/2
+ * scan code set 1 values (0xE0-prefixed codes as 0x100 | code); layouts
+ * live in user space (keymap files). */
+#define AURORA_INPUT_KEY 1
+#define AURORA_INPUT_MOUSE 2
+#define AURORA_INPUT_PRESSED 1u
+struct aurora_input_event {
+    uint8_t type;
+    uint8_t flags;      /* AURORA_INPUT_PRESSED for keys */
+    uint16_t code;      /* key: scan code */
+    int16_t dx, dy;     /* mouse: screen-oriented deltas */
+    int8_t wheel;       /* mouse: + = away from the user (scroll up) */
+    uint8_t buttons;    /* mouse: bit0 left, bit1 right, bit2 middle */
+    uint16_t reserved;
+    uint32_t time_ms;
+};
+#define AURORA_INPUT_SET_LEDS 0x4901   /* (uint32 bits): 1 scroll, 2 num, 4 caps */
+#define AURORA_INPUT_HAS_WHEEL 0x4902  /* -> 0 or 1 */
+
+/* /dev/ptmx: opening it creates a pseudo-terminal whose master is the
+ * returned descriptor (read: program output; write: keyboard input through
+ * the line discipline). */
+#define AURORA_TIOCOPENSLAVE 0x5480    /* -> new descriptor for the slave side */
+#define AURORA_TIOCTAKEUNREAD 0x5481   /* (struct aurora_buf *) -> bytes: unread input */
+struct aurora_buf {
+    uint64_t ptr, len;
 };
 
 /* Initial process stack (System V style), from low to high addresses:

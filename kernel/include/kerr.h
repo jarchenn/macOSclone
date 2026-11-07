@@ -34,4 +34,6 @@
 #define AE_XDEV (-128)         /* cross-filesystem rename */
 #define AE_IO (-129)
 #define AE_NOTSUP (-130)
+#define AE_BUSY (-131)         /* device already in use */
+#define AE_NODEV (-132)
 #endif

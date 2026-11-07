@@ -7,6 +7,7 @@
  * \_S5 package is found by a byte scan of the DSDT: there is no AML
  * interpreter. */
 #include "drivers/acpi.h"
+#include "core/power.h"
 #include "drivers/acpi_tables.h"
 #include "core/boot.h"
 #include "core/log.h"
@@ -15,7 +16,6 @@
 #include "arch/x86_64/io.h"
 #include "arch/cpu.h"
 #include "core/sched.h"
-#include "desktop/desktop.h"
 #include "lib.h"
 
 static struct acpi_info info;
@@ -173,13 +173,12 @@ uint16_t acpi_sci_irq(void) { return parsed ? info.sci_irq : 0; }
 
 /* SCI (level-triggered): the only event Aurora enables is the fixed power
  * button. Pressing it (QEMU: system_powerdown) starts an orderly shutdown
- * in the desktop task, which syncs /home before entering S5. */
+ * in task 0 (core/power.c), which syncs /home before entering S5. */
 static void sci_handler(void)
 {
     if (acpi_power_button_pressed()) {
         klog("acpi: power button pressed");
-        desktop_request_poweroff();
-        sched_wake(sched_desktop());
+        power_request(POWER_OFF);
     }
 }
 

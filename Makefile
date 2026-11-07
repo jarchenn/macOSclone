@@ -11,7 +11,7 @@ B := $(PYTHON) tools/build.py
 MEM ?= 256M
 SMP ?= 1
 
-.PHONY: all help deps run run-bios debug test smoke integration storage network smp stress posix soak check clean dist
+.PHONY: all help deps run run-bios debug test smoke integration storage network smp stress posix desktop soak check clean dist
 
 all:
 	$(B) build --variant release
@@ -61,6 +61,10 @@ stress:
 posix:
 	$(B) build --variant test
 	$(PYTHON) tools/posix_test.py
+
+desktop:
+	$(PYTHON) tools/build.py build --variant test
+	$(PYTHON) tools/desktop_test.py
 
 soak:
 	$(B) build --variant test

@@ -89,6 +89,8 @@ struct proc_start {
     const char *cwd;
 };
 int process_start(const struct proc_start *s);
+/* Makes t the controlling terminal of p (TIOCSCTTY). */
+void proc_set_ctty(struct process *p, struct pty *t);
 
 struct process *process_current(void);
 struct process *process_get(int pid);

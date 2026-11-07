@@ -1,11 +1,12 @@
 # Architecture
 
-Aurora 0.5 is an SMP x86-64 kernel (1–16 CPUs; see [smp.md](smp.md)) with preemptively scheduled,
+Aurora 0.7 is an SMP x86-64 kernel (1–16 CPUs; see [smp.md](smp.md)) with preemptively scheduled,
 isolated user processes (ring 3, one address space each; see
-[processes.md](processes.md)). The desktop and its four applications are
-still compiled into the kernel and run as kernel task 0. A fault in a user
-process kills only that process; a fault in kernel code (including the apps)
-is still a kernel panic.
+[processes.md](processes.md), [userland.md](userland.md)). Since 0.7 the
+desktop is user space too: a display server and one process per app,
+talking over local sockets and shared memory ([desktop.md](desktop.md)). A
+fault in any of them kills only that process; init restarts the display
+server.
 
 ```
  Limine (UEFI or BIOS) ──► _start (entry.S) ──► kmain_early (Limine stack)
@@ -21,7 +22,8 @@ is still a kernel panic.
         VFS: /system (initramfs, RO) + /home (ramfs, RW)
         virtio-blk found? ─► /home moves onto PFS on the data disk
         virtio-net found? ─► network task (DHCP)
-        AURORA_BOOT_OK ─► desktop_main (task 0; never returns)
+        init (pid 1) ─► AURORA_BOOT_OK ─► power_main (task 0: restart/power-off)
+        init ─► /system/bin/display (restarted if it exits) ─► welcome, apps
 ```
 
 ## Source layout
@@ -38,14 +40,13 @@ is still a kernel panic.
 | `kernel/memory/` | bitmap physical allocator, virtual layout, heap core + kernel heap |
 | `kernel/drivers/` | serial, framebuffer, PIC, LAPIC + IOAPIC, PIT, PS/2 controller (+ Caps Lock LED), keyboard & mouse decoders, ACPI tables (portable parser) + power, PCI, VirtIO core, virtio-blk, virtio-net |
 | `kernel/fs/` | path rules, VFS core + open-file table, ramfs and read-only backends, initramfs parser, PFS (persistent, copy-on-write) |
-| `kernel/graphics/` | rect math, surfaces + primitives, compositor, diagnostic console |
-| `kernel/desktop/` | theme/wallpaper/icons, window manager, widgets, desktop shell (menus, dock, input routing, loop) |
-| `kernel/apps/` | Terminal (+ command parser), Files, Notes (+ text buffer), Settings/About, Welcome |
+| `kernel/graphics/` | rect math, surfaces + primitives (shared with user space), diagnostic console |
+| `user/gui/` | 0.7 desktop: display server, client library + toolkit + dialogs, TrueType text, apps (see [desktop.md](desktop.md)) |
 | `tools/` | build driver, image writer, initramfs packer, asset generator, QEMU harness and tests |
 | `tests/host/` | host-side unit tests for the portable modules |
 
 Modules marked portable (decoders, event queues, rect math, VFS, initramfs,
-cmdline, textbuf + clipboard, heap core, pmm core, formatter, ELF validator,
+cmdline, textbuf, heap core, pmm core, formatter, ELF validator,
 PFS, network protocol parsing) contain no hardware access
 and are compiled unchanged into the host tests.
 
@@ -69,7 +70,7 @@ and are compiled unchanged into the host tests.
 All IDT entries are interrupt gates, so IF is clear inside handlers (the
 syscall handler re-enables interrupts). Handlers are short: PIT increments a
 64-bit tick counter and calls `sched_tick`; PS/2 reads bytes, pushes them to
-bounded rings and wakes the desktop task. No allocation, rendering or file I/O
+bounded rings and wakes `/dev/input` readers. No allocation, rendering or file I/O
 in IRQ context. After EOI, a return to user mode (or idle) may switch tasks,
 and every return to user mode runs `signal_return_to_user` (signal
 delivery, thread exit).
@@ -77,17 +78,13 @@ delivery, thread exit).
 ## Event handling
 
 ```
-IRQ1/IRQ12 ─► byte_ring (512 B each, SPSC, drop-newest on overflow)
-main loop  ─► kbd/mouse decoders ─► event_queue (256 events, motion coalesced)
-           ─► desktop: shortcuts, menus, dock, window hit-testing, focus,
-              drag capture ─► focused window's key()/mouse() callbacks
-           ─► app ticks (250 ms) ─► wm_render_dirty ─► compositor_frame
-           ─► cli; if (no work) sched_block() else sti
+IRQ1/IRQ12 ─► byte_ring (512 B each, SPSC, drop-newest on overflow) ─► wake
+/dev/input read (display server) ─► scan codes / mouse packets decoded
+           ─► keymap, repeat, shortcuts, menus, dock, hit-testing, focus
+           ─► S_KEY / S_TEXT / S_MOUSE to the focused or hovered app
+app ─► redraw into a free shared buffer ─► C_COMMIT ─► damage ─► compose
+     ─► /dev/display PRESENT (kernel copies to the framebuffer)
 ```
-
-The desktop task blocks with interrupts disabled until the check is done;
-an IRQ that arrives afterwards marks it runnable, so no wake-up is lost. When
-no task is runnable the idle task runs `sti; hlt`.
 
 ## Memory ownership
 
@@ -98,32 +95,21 @@ no task is runnable the idle task runs `sti; hlt`.
   read-only VFS nodes point into it.
 * Physical pages: owned by the bitmap allocator; page tables, the kernel stack
   and heap pages come from it.
-* Heap: windows, surfaces, VFS nodes and RAM file data. App state is static
-  (one instance per app) so closing a window frees its surface only;
-  the integration test checks heap usage returns to the same value after
-  repeated open/close cycles.
+* Kernel heap: VFS nodes, RAM file data, open-file descriptions, socket
+  queues and message buffers, shared-memory page lists. Window buffers are
+  shared-memory pages, freed when the last mapping and descriptor go; the
+  integration test checks the kernel heap returns to the same value after
+  repeated app open/close cycles.
 
 See [memory.md](memory.md) for the address-space layout.
 
 ## Compositor and app model
 
-The compositor owns a screen-sized XRGB8888 backbuffer and a list of up to 16
-damage rectangles (merged when overlapping; collapsed to one bounding box when
-full). Each frame recomposes only the damaged areas, back to front:
-
-wallpaper (pre-rendered surface) → windows bottom-to-top (shadow, title bar,
-controls, content surface with rounded bottom corners, border) → menu bar →
-dock (+ tooltip) → open menu → cursor.
-
-The cursor is always drawn last and erased by recomposing its old rectangle,
-so it never leaves trails. Presentation converts XRGB to the framebuffer's
-reported channel layout (fast `memcpy` path for the common R16/G8/B0 32-bpp
-layout) using the reported pitch.
-
-Each window owns a content surface. Apps never touch the framebuffer: they
-draw into their surface in `render()` when marked dirty, and the WM blits it.
-Windows are referenced by stable ids; callers re-validate with `wm_get(id)`,
-which avoids callbacks touching destroyed windows.
+See [desktop.md](desktop.md). In short: the display server keeps a scene
+buffer and a presented buffer (scene plus cursor), recomposes only damaged
+rectangles, and draws decorations around each app's committed shared
+buffer. Apps draw into one of two buffers while the server shows the other
+(explicit attach, commit and release).
 
 ## Storage model
 

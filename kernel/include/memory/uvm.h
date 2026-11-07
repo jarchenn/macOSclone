@@ -14,12 +14,23 @@
 #define UVM_MAX_VMAS 64
 
 enum vma_prot { VMA_R = 1, VMA_W = 2, VMA_X = 4 };
-enum vma_kind { VMA_ANON = 0, VMA_IMAGE = 1, VMA_STACK = 2, VMA_HEAP = 3 };
+enum vma_kind { VMA_ANON = 0, VMA_IMAGE = 1, VMA_STACK = 2, VMA_HEAP = 3, VMA_SHARED = 4 };
+
+/* Shared-memory object (0.7): pages allocated up front, each owned once by
+ * the object and once more by every PTE that maps it. Mappings never copy
+ * on write: fork keeps sharing them. */
+struct shm_obj {
+    int refs;            /* descriptors + regions */
+    uint64_t npages;
+    phys_addr_t *pages;
+};
 
 struct vma {
     uint64_t start, end; /* page aligned, end exclusive */
     uint8_t prot;
     uint8_t kind;
+    struct shm_obj *shm; /* VMA_SHARED: the object, one reference per region */
+    uint64_t pgoff;      /* VMA_SHARED: object page mapped at `start` */
 };
 
 struct mm {
@@ -58,6 +69,16 @@ void *mm_kptr(struct mm *m, uint64_t va, bool write);
  * built (not shared, maybe not loaded), allocating the page regardless of
  * the region's protection. */
 void *mm_populate(struct mm *m, uint64_t va);
+
+#define SHM_MAX (64ull << 20)
+struct shm_obj *shm_create(uint64_t bytes); /* zeroed; NULL on OOM or > SHM_MAX */
+void shm_ref(struct shm_obj *o);
+void shm_put(struct shm_obj *o);
+/* Kernel pointer to byte `off` of the object (direct map), or NULL. */
+void *shm_kptr(struct shm_obj *o, uint64_t off);
+/* Maps pages [pgoff, pgoff + len/PAGE) of `o` at start (replacing what was
+ * there); the region takes a reference. */
+int mm_map_shared(struct mm *m, uint64_t start, uint64_t len, uint8_t prot, struct shm_obj *o, uint64_t pgoff);
 
 /* brk: returns the new break (the old one on failure). */
 uint64_t mm_brk(struct mm *m, uint64_t want);

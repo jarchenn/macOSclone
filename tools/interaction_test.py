@@ -266,6 +266,11 @@ def save_as(d, name):
         d.g.key("backspace")
     since = d.g.mark()
     d.g.type_text(name + "\n")
+    # 0.7 save dialog: an existing file asks for confirmation first.
+    m = d.g.wait_for(r"@@(NOTES_SAVE path=\S+ result=-?\d+ len=\d+ crc=[0-9a-f]+|DIALOG_CONFIRM overwrite)",
+                     timeout=15, since=since)
+    if "DIALOG_CONFIRM" in m.group(0):
+        d.g.key("ret")
     return d.g.wait_for(r"@@NOTES_SAVE path=(\S+) result=(-?\d+) len=(\d+) crc=([0-9a-f]+)", timeout=15, since=since)
 
 
@@ -397,7 +402,7 @@ def s_theme_switch(d):
     d.dock_click("Settings")
     d.wait_focus("Settings", since)
     s = d.window("Settings")
-    tab_x = (s["w"] - 330) // 2 + 55
+    tab_x = (s["w"] - 500) // 2 + 50  # 0.7: five 100 px tabs, Appearance first
     d.click(*d.content_point("Settings", tab_x, 25))
     since = d.g.mark()
     d.click(*d.content_point("Settings", 24 + 90, 96 + 60))
@@ -605,10 +610,14 @@ def term_focus(d):
 
 def s_user_programs(d):
     term_focus(d)
+    # 0.7: the Terminal reads program output asynchronously, so the exit
+    # marker may come before the output line: search from the command on.
+    since = d.g.mark()
     d.terminal("hello alpha beta", r"@@TERM Hello from user space! pid=\d+ argc=3 \[alpha\] \[beta\]")
-    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=hello status=0", timeout=10)
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=hello status=0", timeout=10, since=since)
+    since = d.g.mark()
     d.terminal("badptr", r"@@TERM badptr: 10/10 checks passed")
-    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=badptr status=0", timeout=10)
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=badptr status=0", timeout=10, since=since)
     since = d.g.mark()
     d.terminal("crash")
     # 0.6: a fault is a signal; the wait status is the signal number.
@@ -750,7 +759,7 @@ def s_process_leaks(d):
     return f"10 process lifetimes: free physical memory {before} -> {after} KiB"
 
 
-WM_MIN_W, WM_MIN_H = 320, 180  # kernel/include/desktop/desktop.h
+WM_MIN_W, WM_MIN_H = 200, 180  # Notes: 200x150 content + 30 px title bar (user/gui/apps/notes)
 
 
 def s_window_resize(d):
@@ -917,7 +926,9 @@ def main():
         g.start()
         d = Desktop(g)
         d.boot()
-        # Dismiss the welcome window with Enter (it has keyboard focus).
+        # Dismiss the welcome window with Enter (it has keyboard focus). It
+        # is a separate process since 0.7: wait until it is on screen.
+        g.wait_for(r"@@FOCUS id=1 app=Welcome", timeout=30)
         g.key("ret")
         g.wait_for(r"@@WIN_CLOSE id=1", timeout=10)
         scenarios = [("soak", lambda d: s_soak(d, args.soak))] if args.soak else SCENARIOS

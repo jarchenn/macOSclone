@@ -103,6 +103,25 @@ pipes, poll, dup), `forktest 1000` (free page baseline), `sigtest`
 across a reboot with a data disk, and Lua 5.4.9's test suite (portable
 subset, `_U`). Result: **10/10 at -smp 1 and at -smp 4**.
 
+## 8. Desktop: `make desktop`
+
+`tools/desktop_test.py` runs the 0.7 acceptance tests: golden screenshots
+(`tests/golden/*.png`: Settings > Appearance with text at 11, 13, 15 and
+24 px; Notes at 200x150 and 1600x1000; the save and open dialogs), compared
+region by region with `tools/imgdiff.py` (per-channel tolerance 8, at most
+0.1 % or 64 pixels may differ); Notes resized 200x150 -> 1600x1000 -> 640x400
+at 1920x1200, each size acknowledged by the app (`WIN_ACK ... match=1`) and
+no pixel outside the window left different from the empty desktop; a note
+saved into a folder made with New Folder, overwrite confirmed, reopened
+through the open dialog with the same CRC; text copied in Notes pasted into
+the Terminal after Notes exited; US-International dead keys (é, ü) and the
+Caps Lock LED; the mouse wheel; 1024x768 -> 800x600 from Settings with four
+windows re-laid out (maximized one refitted, resized ones redrawn); killing
+Notes; killing the display server (init restarts it, a new Terminal works).
+
+`--update-goldens` rewrites the golden images from the current build; they
+are inspected by eye before being committed (D-0.7-9).
+
 ## Manual checks
 
 | Check | Procedure | Observed |
@@ -114,5 +133,5 @@ subset, `_U`). Result: **10/10 at -smp 1 and at -smp 4**.
 ## Not covered
 
 Linux/Docker builds (not executed), real hardware, kernel stack-overflow
-guard page (mapped but not deliberately triggered), and the right mouse button
-and wheel (not implemented).
+guard page (mapped but not deliberately triggered), and the right mouse
+button (not used by any app).

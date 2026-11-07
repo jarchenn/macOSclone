@@ -7,6 +7,7 @@
  * bytes from keyboard bytes, and push them to bounded rings.
  */
 #include "drivers/input.h"
+#include "drivers/input_dev.h"
 #include "drivers/pic.h"
 #include "arch/cpu.h"
 #include "arch/x86_64/io.h"
@@ -106,7 +107,7 @@ static bool dev_send(bool aux, uint8_t v)
 static uint32_t led_updates;
 uint32_t ps2_led_updates(void) { return led_updates; }
 
-void ps2_set_leds(bool caps)
+void ps2_set_led_bits(uint8_t bits)
 {
     if (!have_kbd)
         return;
@@ -116,13 +117,18 @@ void ps2_set_leds(bool caps)
     if (wait_write()) {
         outb(DATA, 0xED);
         if (wait_write()) {
-            outb(DATA, caps ? 0x04 : 0x00);
+            outb(DATA, bits & 7);
             led_updates++;
-            TEST_EVENT("KBD_LEDS caps=%d n=%u", caps ? 1 : 0, led_updates);
+            TEST_EVENT("KBD_LEDS caps=%d n=%u", (bits & 4) ? 1 : 0, led_updates);
         }
     }
     irq_restore(f);
 }
+
+void ps2_set_leds(bool caps) { ps2_set_led_bits(caps ? 4 : 0); }
+
+static bool have_wheel;
+bool ps2_mouse_has_wheel(void) { return have_wheel; }
 
 static void kbd_irq(void)
 {
@@ -133,7 +139,7 @@ static void kbd_irq(void)
         uint8_t b = inb(DATA);
         byte_ring_push((st & ST_AUX) ? &mouse_ring : &kbd_ring, b);
     }
-    sched_wake(sched_desktop()); /* input is handled by the desktop task */
+    input_dev_wake(); /* /dev/input readers and poll() */
 }
 
 static void mouse_irq(void) { kbd_irq(); /* same routing logic */ }
@@ -205,7 +211,13 @@ bool ps2_init(void)
             if (r != 0xAA || id != 0x00)
                 klog("ps2: mouse reset returned %x id %x", r, id);
         }
-        have_mouse = dev_send(true, 0xF6) && dev_send(true, 0xF4); /* defaults, enable reporting */
+        have_mouse = dev_send(true, 0xF6); /* defaults */
+        /* IntelliMouse: sample rates 200, 100, 80, then the id reads 3. */
+        if (have_mouse && dev_send(true, 0xF3) && dev_send(true, 200) && dev_send(true, 0xF3) &&
+            dev_send(true, 100) && dev_send(true, 0xF3) && dev_send(true, 80) && dev_send(true, 0xF2))
+            have_wheel = read_byte() == 0x03;
+        if (have_mouse)
+            have_mouse = dev_send(true, 0xF3) && dev_send(true, 100) && dev_send(true, 0xF4); /* enable */
         flush();
     }
 
@@ -226,7 +238,8 @@ bool ps2_init(void)
         irq_install(IRQ_MOUSE, mouse_irq);
         irq_enable(IRQ_MOUSE);
     }
-    klog("ps2: keyboard %s, mouse %s (3-byte packets)", have_kbd ? "ok" : "missing", have_mouse ? "ok" : "missing");
+    klog("ps2: keyboard %s, mouse %s (%s packets)", have_kbd ? "ok" : "missing", have_mouse ? "ok" : "missing",
+         have_wheel ? "4-byte wheel" : "3-byte");
     return have_kbd;
 
 fail:
