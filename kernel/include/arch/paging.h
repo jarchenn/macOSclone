@@ -22,5 +22,9 @@ bool paging_pd_slot_free(uint64_t *pml4, uint64_t va);
 uint64_t paging_unmap_4k(uint64_t *pml4, uint64_t va); /* returns old pa or 0 */
 uint64_t paging_translate(uint64_t *pml4, uint64_t va);
 extern uint64_t paging_table_pages;
+/* Leaf (4 KiB) entry for va, or 0 if not mapped through 4 KiB tables. */
+uint64_t paging_get_pte(uint64_t *pml4, uint64_t va);
+bool paging_ensure_pml4_entry(uint64_t *pml4, unsigned index);
+uint64_t paging_free_user_half(uint64_t *pml4);
 
 #endif

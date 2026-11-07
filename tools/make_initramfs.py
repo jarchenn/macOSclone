@@ -39,19 +39,29 @@ def check_component(c: str) -> None:
         raise SystemExit(f"error: invalid initramfs path component {c!r}")
 
 
-def pack(src: Path) -> bytes:
-    entries = []
+def pack(src: Path, extra=None) -> bytes:
+    """Packs directory `src`; `extra` maps archive paths to file bytes
+    (e.g. compiled programs) that are added with their parent directories."""
+    found = {}
     for p in sorted(src.rglob("*")):
         rel = p.relative_to(src).as_posix()
         if p.name == ".keep":
             continue
+        if p.is_dir():
+            found[rel] = (1, b"")
+        elif p.is_file():
+            found[rel] = (2, p.read_bytes().replace(b"\r\n", b"\n"))
+    for rel, data in (extra or {}).items():
+        parts = rel.split("/")
+        for i in range(1, len(parts)):
+            found.setdefault("/".join(parts[:i]), (1, b""))
+        found[rel] = (2, bytes(data))
+    entries = []
+    for rel in sorted(found):  # parents sort before their children
         for c in rel.split("/"):
             check_component(c)
-        if p.is_dir():
-            entries.append((1, rel, b""))
-        elif p.is_file():
-            data = p.read_bytes().replace(b"\r\n", b"\n")
-            entries.append((2, rel, data))
+        typ, data = found[rel]
+        entries.append((typ, rel, data))
     body = bytearray()
     for typ, rel, data in entries:
         pb = rel.encode("ascii")

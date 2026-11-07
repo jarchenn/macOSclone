@@ -70,6 +70,9 @@ bool mouse_decode(struct mouse_decoder *d, uint8_t byte, uint64_t now_ms, struct
 /* Kernel PS/2 driver (ps2.c) */
 bool ps2_init(void);
 bool ps2_has_mouse(void);
+/* Updates the keyboard LEDs (Caps Lock). Bounded waits; safe to fail. */
+void ps2_set_leds(bool caps);
+uint32_t ps2_led_updates(void);
 struct byte_ring *ps2_kbd_ring(void);
 struct byte_ring *ps2_mouse_ring(void);
 

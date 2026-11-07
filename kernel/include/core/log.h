@@ -7,6 +7,7 @@
 void klog(const char *fmt, ...) PRINTF_LIKE(1, 2);
 void klog_raw(const char *s);
 void klog_set_console(bool enabled);
+void klog_force_unlock(void);
 
 #ifdef AURORA_TEST
 /* Test-only structured markers ("@@NAME k=v ...") consumed by the tools/ test scripts */

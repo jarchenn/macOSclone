@@ -2,6 +2,7 @@
 #include "desktop/desktop.h"
 #include "apps/textbuf.h"
 #include "fs/vfs.h"
+#include "apps/app_util.h"
 #include "core/log.h"
 #include "lib.h"
 
@@ -29,6 +30,7 @@ static struct {
     char field[VFS_NAME_MAX + 1];
     char dlg_error[96];
     int hover;
+    bool selecting; /* mouse button held in the text area */
 } N;
 
 /* Toolbar / dialog hit targets */
@@ -172,18 +174,26 @@ static void render(struct window *w, struct surface *s)
     int32_t ty = TOOLBAR_H + 8;
     int crow, ccol;
     pos_to_rc(cols, N.tb.cursor, &crow, &ccol);
+    size_t sel_a = 0, sel_b = 0;
+    bool has_sel = tb_selection(&N.tb, &sel_a, &sel_b);
     if (N.tb.len == 0 && !N.dialog)
         draw_text(s, FONT, PAD, ty, "Start typing...", t->text_dim);
     for (size_t i = 0; i < N.tb.len; i++) {
         char ch = N.tb.data[i];
+        bool in_sel = has_sel && i >= sel_a && i < sel_b;
         if (ch == '\n') {
+            if (in_sel && row >= N.scroll && row < N.scroll + rows)
+                draw_fill(s, rect_make(PAD + col * 8, ty + (row - N.scroll) * LINE_H - 1, 6, 18), t->selection);
             row++;
             col = 0;
             continue;
         }
         if (row >= N.scroll && row < N.scroll + rows) {
             char str[2] = { ch, 0 };
-            draw_text(s, FONT, PAD + col * 8, ty + (row - N.scroll) * LINE_H, str, t->text);
+            int32_t gy = ty + (row - N.scroll) * LINE_H;
+            if (in_sel)
+                draw_fill(s, rect_make(PAD + col * 8, gy - 1, 8, 18), t->selection);
+            draw_text(s, FONT, PAD + col * 8, gy, str, in_sel ? t->sel_text : t->text);
         }
         if (++col >= cols) {
             row++;
@@ -207,7 +217,7 @@ static void render(struct window *w, struct surface *s)
     if (N.status[0])
         draw_text_fit(s, FONT, 12, fy + 5, N.status, status_w, N.status_err ? t->danger : t->text_dim);
     else
-        draw_text_fit(s, FONT, 12, fy + 5, "Files are stored in memory and reset when Aurora restarts.", status_w, t->text_dim);
+        draw_text_fit(s, FONT, 12, fy + 5, app_storage_note(), status_w, t->text_dim);
     draw_text(s, FONT, s->w - 12 - text_width(FONT, pos), fy + 5, pos, t->text_dim);
 
     /* Dialogs */
@@ -302,7 +312,8 @@ static int write_to(const char *path)
         str_copy(N.path, path, sizeof N.path);
         N.dirty = false;
         N.readonly = false;
-        set_status(false, "Saved %s (%zu bytes, in memory)", path, N.tb.len);
+        set_status(false, "Saved %s (%zu bytes, %s)", path, N.tb.len,
+                   vfs_home_persistent() && str_starts_with(path, "/home") ? "on disk" : "in memory");
         files_refresh_all();
     } else {
         /* The buffer is untouched: edits are preserved. */
@@ -404,6 +415,19 @@ static void dialog_button(int b)
 
 /* ---- Input ------------------------------------------------------------------- */
 
+static void notes_changed(struct window *w, bool changed, bool ok)
+{
+    (void)w;
+    if (!changed)
+        return;
+    if (!N.dirty) {
+        N.dirty = true;
+        update_title();
+    }
+    if (ok && N.status_err)
+        N.status[0] = 0;
+}
+
 static void key(struct window *w, const struct key_event *e)
 {
     N.caret = true;
@@ -441,11 +465,39 @@ static void key(struct window *w, const struct key_event *e)
             request(PEND_NEW, NULL);
         } else if (c == 'o') {
             files_open("/home/notes");
+        } else if (c == 'a') {
+            tb_select_all(&N.tb);
+        } else if (c == 'c' || c == 'x') {
+            size_t a, b;
+            if (tb_selection(&N.tb, &a, &b)) {
+                clipboard_set(N.tb.data + a, b - a);
+                TEST_EVENT("CLIP_SET len=%zu crc=%08x", b - a, crc32(N.tb.data + a, b - a));
+                if (c == 'x')
+                    notes_changed(w, tb_delete_selection(&N.tb), true);
+            }
+        } else if (c == 'v') {
+            size_t n;
+            const char *clip = clipboard_get(&n);
+            if (n) {
+                bool ok = tb_insert_text(&N.tb, clip, n);
+                if (!ok)
+                    set_status(true, "Paste refused: the note would exceed %d bytes.", TEXTBUF_CAP);
+                notes_changed(w, ok, ok);
+            }
         }
+        ensure_visible(&w->content);
         wm_invalidate(w);
         return;
     }
     bool changed = false, ok = true;
+    bool moving = e->key == KEY_LEFT || e->key == KEY_RIGHT || e->key == KEY_UP || e->key == KEY_DOWN ||
+                  e->key == KEY_HOME || e->key == KEY_END;
+    if (moving) {
+        if (e->mods & MOD_SHIFT)
+            tb_select_begin(&N.tb);
+        else
+            tb_select_clear(&N.tb);
+    }
     switch (e->key) {
     case KEY_LEFT: tb_left(&N.tb); break;
     case KEY_RIGHT: tb_right(&N.tb); break;
@@ -470,14 +522,7 @@ static void key(struct window *w, const struct key_event *e)
         set_status(true, "Note is full (%d bytes max). Nothing was lost.", TEXTBUF_CAP);
         TEST_EVENT("NOTES_FULL len=%zu", N.tb.len);
     }
-    if (changed) {
-        if (!N.dirty) {
-            N.dirty = true;
-            update_title();
-        }
-        if (ok && N.status_err)
-            N.status[0] = '\0';
-    }
+    notes_changed(w, changed, ok);
     ensure_visible(&w->content);
     wm_invalidate(w);
 }
@@ -502,6 +547,35 @@ static int hit(struct surface *s, int32_t x, int32_t y)
     return B_NONE;
 }
 
+/* Buffer offset under a content-relative point (clamped to the text). */
+static size_t text_pos_at(struct surface *s, int32_t x, int32_t y)
+{
+    int row = N.scroll + (y - TOOLBAR_H - 8) / LINE_H;
+    int col = (x - PAD + 4) / 8;
+    if (y < TOOLBAR_H + 8)
+        row = N.scroll - (y < TOOLBAR_H ? 1 : 0);
+    if (row < 0)
+        return 0;
+    if (col < 0)
+        col = 0;
+    return rc_to_pos(wrap_cols(s), row, col);
+}
+
+static bool word_char(char c) { return c != ' ' && c != '\n' && c != '\t'; }
+
+static void select_word(void)
+{
+    size_t a = N.tb.cursor, b = N.tb.cursor;
+    while (a > 0 && word_char(N.tb.data[a - 1]))
+        a--;
+    while (b < N.tb.len && word_char(N.tb.data[b]))
+        b++;
+    N.tb.anchor = a;
+    N.tb.cursor = b;
+    N.tb.has_sel = a != b;
+    N.selecting = false;
+}
+
 static void mouse(struct window *w, const struct win_mouse *m)
 {
     struct surface *s = &w->content;
@@ -511,6 +585,19 @@ static void mouse(struct window *w, const struct win_mouse *m)
             N.hover = b;
             wm_invalidate(w);
         }
+        if (N.selecting && (m->buttons & 1) && !N.dialog) {
+            size_t before = N.tb.cursor;
+            N.tb.cursor = text_pos_at(s, m->x, m->y);
+            N.tb.goal_col = N.tb.cursor - tb_line_start(&N.tb, N.tb.cursor);
+            if (N.tb.cursor != before) {
+                ensure_visible(s);
+                wm_invalidate(w);
+            }
+        }
+        return;
+    }
+    if (m->kind == WM_MOUSE_UP) {
+        N.selecting = false;
         return;
     }
     if (m->kind != WM_MOUSE_DOWN)
@@ -528,14 +615,15 @@ static void mouse(struct window *w, const struct win_mouse *m)
     case B_SAVEAS: open_saveas(); break;
     default:
         if (m->y > TOOLBAR_H && m->y < s->h - FOOTER_H) {
-            int row = N.scroll + (m->y - TOOLBAR_H - 8) / LINE_H;
-            int col = (m->x - PAD + 4) / 8;
-            if (row < 0)
-                row = 0;
-            if (col < 0)
-                col = 0;
-            N.tb.cursor = rc_to_pos(wrap_cols(s), row, col);
+            if (m->clicks == 2) {
+                select_word();
+                break;
+            }
+            tb_select_clear(&N.tb);
+            N.tb.cursor = text_pos_at(s, m->x, m->y);
             N.tb.goal_col = N.tb.cursor - tb_line_start(&N.tb, N.tb.cursor);
+            tb_select_begin(&N.tb); /* anchor at the clicked position */
+            N.selecting = true;
         }
         break;
     }

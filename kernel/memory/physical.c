@@ -136,6 +136,18 @@ phys_addr_t pmm_core_alloc_contig(struct pmm *p, size_t pages)
     return 0;
 }
 
+phys_addr_t pmm_core_claim_below(struct pmm *p, phys_addr_t lo, phys_addr_t hi)
+{
+    for (uint64_t i = ALIGN_UP(lo, PAGE_SIZE) / PAGE_SIZE; i < hi / PAGE_SIZE && i < p->page_count; i++) {
+        if (i == 0 || bit_get(p, i))
+            continue;
+        bit_set(p, i);
+        p->free_pages--;
+        return i * PAGE_SIZE;
+    }
+    return 0;
+}
+
 int pmm_core_free(struct pmm *p, phys_addr_t addr)
 {
     if ((addr & (PAGE_SIZE - 1)) || addr == 0 || addr / PAGE_SIZE >= p->page_count ||
@@ -176,7 +188,12 @@ bool pmm_core_is_used(const struct pmm *p, phys_addr_t addr)
 }
 
 #ifndef AURORA_HOST
+#include "core/spinlock.h"
 static struct pmm g_pmm;
+phys_addr_t g_low_page;
+/* Lock order: heap -> vmm -> pmm. Never held across anything that sleeps. */
+static DEFINE_SPINLOCK(pmm_lock, "pmm");
+static uint16_t *share; /* extra owners per page (copy-on-write); 0 = one owner */
 
 void pmm_init(void)
 {
@@ -185,6 +202,15 @@ void pmm_init(void)
     if (!home)
         panic("pmm: no usable region can hold the %zu-byte page bitmap", bytes);
     pmm_core_init(&g_pmm, g_boot.memmap, g_boot.memmap_count, phys_to_virt(home), home, bytes);
+    /* Reserve one page below 1 MiB for the SMP real-mode trampoline before
+     * anything else can take low memory. */
+    g_low_page = pmm_core_claim_below(&g_pmm, 0x8000, 0x9F000);
+    size_t sbytes = (size_t)g_pmm.page_count * sizeof(uint16_t);
+    phys_addr_t sp = pmm_core_alloc_contig(&g_pmm, (sbytes + PAGE_SIZE - 1) / PAGE_SIZE);
+    if (!sp)
+        panic("pmm: cannot allocate the %zu-byte page share table", sbytes);
+    share = phys_to_virt(sp);
+    memset(share, 0, sbytes);
     klog("pmm: %llu pages tracked, %llu usable (%llu MiB), bitmap %zu KiB at phys %llx",
          (unsigned long long)g_pmm.page_count, (unsigned long long)g_pmm.free_pages,
          (unsigned long long)(g_pmm.free_pages * PAGE_SIZE >> 20), bytes / 1024, (unsigned long long)home);
@@ -192,23 +218,83 @@ void pmm_init(void)
 
 phys_addr_t pmm_alloc_page(void)
 {
-    uint64_t f = 0;
-    __asm__ volatile("pushfq; popq %0; cli" : "=r"(f) : : "memory");
+    uint64_t f = spin_lock_irqsave(&pmm_lock);
     phys_addr_t p = pmm_core_alloc(&g_pmm);
-    if (f & (1u << 9))
-        __asm__ volatile("sti" ::: "memory");
+    spin_unlock_irqrestore(&pmm_lock, f);
     if (p)
         memset(phys_to_virt(p), 0, PAGE_SIZE);
     return p;
 }
 
+phys_addr_t pmm_alloc_contig(size_t pages)
+{
+    uint64_t f = spin_lock_irqsave(&pmm_lock);
+    phys_addr_t p = pmm_core_alloc_contig(&g_pmm, pages);
+    spin_unlock_irqrestore(&pmm_lock, f);
+    if (p)
+        memset(phys_to_virt(p), 0, pages * PAGE_SIZE);
+    return p;
+}
+
 void pmm_free_page(phys_addr_t addr)
 {
+    uint64_t f = spin_lock_irqsave(&pmm_lock);
+    if (addr / PAGE_SIZE < g_pmm.page_count && share[addr / PAGE_SIZE]) {
+        spin_unlock_irqrestore(&pmm_lock, f);
+        panic("pmm: free of shared page %llx", (unsigned long long)addr);
+    }
     int r = pmm_core_free(&g_pmm, addr);
+    spin_unlock_irqrestore(&pmm_lock, f);
     if (r == PMM_DOUBLE_FREE)
         panic("pmm: double free of physical page %llx", (unsigned long long)addr);
     if (r == PMM_INVALID)
         panic("pmm: invalid free of physical address %llx", (unsigned long long)addr);
+}
+
+void pmm_page_share(phys_addr_t pa)
+{
+    uint64_t i = pa / PAGE_SIZE;
+    uint64_t f = spin_lock_irqsave(&pmm_lock);
+    if (i >= g_pmm.page_count || !bit_get(&g_pmm, i) || share[i] == UINT16_MAX) {
+        spin_unlock_irqrestore(&pmm_lock, f);
+        panic("pmm: cannot share page %llx", (unsigned long long)pa);
+    }
+    share[i]++;
+    spin_unlock_irqrestore(&pmm_lock, f);
+}
+
+void pmm_page_release(phys_addr_t pa)
+{
+    uint64_t i = pa / PAGE_SIZE;
+    uint64_t f = spin_lock_irqsave(&pmm_lock);
+    if (i < g_pmm.page_count && share[i]) {
+        share[i]--;
+        spin_unlock_irqrestore(&pmm_lock, f);
+        return;
+    }
+    int r = pmm_core_free(&g_pmm, pa);
+    spin_unlock_irqrestore(&pmm_lock, f);
+    if (r == PMM_DOUBLE_FREE)
+        panic("pmm: double release of physical page %llx", (unsigned long long)pa);
+    if (r == PMM_INVALID)
+        panic("pmm: invalid release of physical address %llx", (unsigned long long)pa);
+}
+
+uint32_t pmm_page_owners(phys_addr_t pa)
+{
+    uint64_t i = pa / PAGE_SIZE;
+    uint64_t f = spin_lock_irqsave(&pmm_lock);
+    uint32_t n = (i < g_pmm.page_count && bit_get(&g_pmm, i)) ? 1u + share[i] : 0u;
+    spin_unlock_irqrestore(&pmm_lock, f);
+    return n;
+}
+
+uint64_t pmm_free_count(void)
+{
+    uint64_t f = spin_lock_irqsave(&pmm_lock);
+    uint64_t n = g_pmm.free_pages;
+    spin_unlock_irqrestore(&pmm_lock, f);
+    return n;
 }
 
 void pmm_reclaim_bootloader(void)

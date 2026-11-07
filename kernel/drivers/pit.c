@@ -2,11 +2,18 @@
 #include "arch/cpu.h"
 #include "arch/x86_64/io.h"
 #include "drivers/pic.h"
+#include "core/sched.h"
+#include "drivers/apic.h"
 
 static uint64_t ticks; /* written only by IRQ0; 64-bit aligned loads are atomic */
 static uint32_t divisor;
 
-static void pit_irq(void) { __atomic_store_n(&ticks, ticks + 1, __ATOMIC_RELEASE); }
+static void pit_irq(void)
+{
+    __atomic_store_n(&ticks, ticks + 1, __ATOMIC_RELEASE);
+    if (!apic_timer_initial_count())
+        sched_tick(); /* until the LAPIC timers take over the scheduler tick */
+}
 
 void pit_init(void)
 {
@@ -15,7 +22,7 @@ void pit_init(void)
     outb(0x40, (uint8_t)(divisor & 0xFF));
     outb(0x40, (uint8_t)(divisor >> 8));
     irq_install(IRQ_TIMER, pit_irq);
-    pic_unmask(IRQ_TIMER);
+    irq_enable(IRQ_TIMER);
 }
 
 uint32_t pit_divisor(void) { return divisor; }

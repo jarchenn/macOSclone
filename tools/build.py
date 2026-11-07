@@ -27,14 +27,15 @@ import aurora_env as env  # noqa: E402
 import fetch_deps  # noqa: E402
 import mkfat  # noqa: E402
 import make_initramfs  # noqa: E402
+import userland  # noqa: E402
 
 ROOT = env.ROOT
 BUILD = env.BUILD
-VERSION = "0.1.0"
+VERSION = "0.6.0"
 
 VARIANTS = {
     "release": [],
-    "test": ["-DAURORA_TEST=1"],
+    "test": ["-DAURORA_TEST=1", "-DAURORA_LOCKDEP=1"],
     "panic": ["-DAURORA_TEST=1", "-DAURORA_PANIC_TEST=1"],
 }
 
@@ -50,6 +51,7 @@ KERNEL_CFLAGS = [
     "-Werror=implicit-function-declaration", "-Werror=return-type",
     "-Werror=incompatible-pointer-types", "-Werror=int-conversion",
 ]
+
 
 # Kernel modules that are hardware independent and compiled into host tests.
 HOST_TEST_SOURCES = [
@@ -68,6 +70,10 @@ HOST_TEST_SOURCES = [
     "kernel/apps/textbuf.c",
     "kernel/memory/heap.c",
     "kernel/memory/physical.c",
+    "kernel/core/elf.c",
+    "kernel/fs/pfs.c",
+    "kernel/net/proto.c",
+    "kernel/drivers/acpi_tables.c",
 ]
 
 
@@ -168,9 +174,51 @@ def build_kernel(variant: str) -> Path:
     return elf
 
 
-def build_initramfs(variant: str) -> Path:
+def compile_obj(cc, flags, src: Path, objdir: Path, force: bool) -> Path:
+    name = rel(src).replace("\\", "/").replace("/", "_")
+    obj = objdir / (name + ".o")
+    dep = objdir / (name + ".d")
+    if force or needs_rebuild(obj, dep, src):
+        obj.parent.mkdir(parents=True, exist_ok=True)
+        print(f"  UCC {rel(src)}")
+        run([cc] + flags + ["-MMD", "-MF", str(dep), "-c", str(src), "-o", str(obj)])
+    return obj
+
+
+def build_user(variant: str) -> dict:
+    """Builds every user/bin/*.c program against newlib + Aurora's libc
+    layer (tools/userland.py); returns {name: elf_path}."""
+    userland.ensure_sysroot()
+    cc = env.require("clang", env.clang())
+    udir = BUILD / variant / "user"
+    objdir = udir / "obj"
+    flags = userland.target_flags(userland.USER_PROGRAM_FLAGS + [f'-DAURORA_VERSION="{VERSION}"'])
+    stamp = udir / "flags.txt"
+    flagline = " ".join(flags) + (userland.SYSROOT / "lib" / "aurora.stamp").read_text()
+    force = not stamp.exists() or stamp.read_text() != flagline
+    udir.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(flagline)
+    script = ROOT / "user/linker.ld"
+    libs = [userland.SYSROOT / "lib" / n for n in ("crt0.o", "libaurora.a", "libc.a", "libm.a")]
+    out = {}
+    for src in sorted((ROOT / "user/bin").glob("*.c")):
+        obj = compile_obj(cc, flags, src, objdir, force)
+        elf = udir / src.stem
+        deps = [obj, script] + libs
+        if not elf.exists() or any(d.stat().st_mtime > elf.stat().st_mtime for d in deps):
+            print(f"  ULD {rel(elf)}")
+            userland.link_program([obj], elf, script)
+        out[src.stem] = elf
+    for name, elf in userland.build_ports(variant).items():
+        out[name] = elf
+    return out
+
+
+def build_initramfs(variant: str, programs: dict) -> Path:
     out = BUILD / variant / "initramfs.img"
-    data = make_initramfs.pack(ROOT / "initramfs")
+    extra = {f"system/bin/{name}": path.read_bytes() for name, path in programs.items()}
+    extra.update(userland.port_data())
+    data = make_initramfs.pack(ROOT / "initramfs", extra)
     if not out.exists() or out.read_bytes() != data:
         print(f"  FS  {rel(out)}")
         out.write_bytes(data)
@@ -224,7 +272,8 @@ def cmd_build(args):
     for v in (args.variant if isinstance(args.variant, list) else [args.variant]):
         print(f"[{v}]")
         elf = build_kernel(v)
-        initrd = build_initramfs(v)
+        programs = build_user(v)
+        initrd = build_initramfs(v, programs)
         img = build_image(v, elf, initrd)
         if v == "release":
             shutil.copyfile(img, BUILD / "aurora.img")
@@ -348,6 +397,19 @@ def cmd_check(args):
             check(elf_path.read_bytes() in img, "image contains the current kernel.elf")
         else:
             check(False, f"{rel(img_path)} exists")
+        # 0.6: every user program is a static non-PIE executable with W^X
+        # segments and (when it has thread-local data) one PT_TLS header.
+        progs = sorted(p for p in (BUILD / v / "user").iterdir() if p.is_file() and p.suffix == "")
+        bad = []
+        for p in progs:
+            u = parse_elf(p)
+            types = [ph["type"] for ph in u["phdrs"]]
+            wx = any(ph["type"] == 1 and (ph["flags"] & 2) and (ph["flags"] & 1) for ph in u["phdrs"])
+            if u["type"] != 2 or 3 in types or 2 in types or wx or types.count(7) > 1 or u["entry"] != 0x400000:
+                bad.append(p.name)
+        check(len(progs) >= 40 and not bad,
+              f"{len(progs)} user programs: static ET_EXEC at 0x400000, no PT_INTERP/PT_DYNAMIC, W^X"
+              + (f" (bad: {', '.join(bad)})" if bad else ""))
     sys.exit(0 if ok else 1)
 
 
@@ -386,7 +448,10 @@ HELP = """Aurora OS 0.1 - make targets
   make debug        QEMU paused with a GDB stub on tcp::1234
   make test         portable host tests (ASan/UBSan when the host compiler has them)
   make smoke        real-guest boot tests: 128/256/512 MiB UEFI, BIOS, panic diagnostic
-  make integration  real-guest input / window / file tests via QMP (test build)
+  make integration  real-guest input / window / file / process tests via QMP (test build)
+  make storage      persistent /home: reboot, power loss, crash-consistency stress
+  make network      DHCP, ping, DNS, UDP, TCP and HTTP against host-side test servers
+  make posix        0.6 POSIX userland acceptance tests (pipelines, signals, fork, Lua test suite)
   make soak         4-minute random input + idle soak test
   make check        image and linkage consistency checks
   make clean        remove build/ only
@@ -410,7 +475,10 @@ def main():
         r = sub.add_parser(name)
         r.add_argument("--variant", default="release", choices=list(VARIANTS))
         r.add_argument("--memory", default="256M")
+        r.add_argument("--smp", type=int, default=1, help="number of virtual CPUs")
         r.add_argument("--bios", action="store_true", help="boot via SeaBIOS instead of OVMF")
+        r.add_argument("--no-disk", action="store_true", help="no persistent data disk (/home in RAM)")
+        r.add_argument("--no-net", action="store_true", help="no network card")
     sub.add_parser("test")
     c = sub.add_parser("check")
     c.add_argument("--variant", choices=list(VARIANTS))
@@ -443,8 +511,16 @@ def cmd_run_wrapper(args, gdb):
     rundir = BUILD / "run"
     rundir.mkdir(parents=True, exist_ok=True)
     vc = vars_copy(rundir) if not args.bios else None
+    disk = None
+    if not args.no_disk:
+        disk = rundir / "data.img"
+        if not disk.exists():
+            with open(disk, "wb") as f:
+                f.truncate(32 * 1024 * 1024)  # blank: Aurora formats it on first boot
+            print(f"created {rel(disk)} (32 MiB persistent /home)")
     cmd = env.qemu_command(img, vc, memory=args.memory, firmware="bios" if args.bios else "uefi",
-                           serial="stdio", no_reboot=False, gdb=gdb)
+                           serial="stdio", no_reboot=False, gdb=gdb, data_disk=disk,
+                           network=None if args.no_net else True, smp=args.smp)
     print("+ " + " ".join(f'"{c}"' if " " in c else c for c in cmd))
     if gdb:
         print("GDB stub listening on tcp::1234; the guest is paused until a debugger continues it.")

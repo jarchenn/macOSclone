@@ -14,7 +14,12 @@ struct interrupt_frame {
 
 #define GDT_KERNEL_CODE 0x08
 #define GDT_KERNEL_DATA 0x10
-#define GDT_TSS 0x18
+#define GDT_USER_DATA 0x18
+#define GDT_USER_CODE 0x20
+#define GDT_TSS 0x28
+#define USER_CS (GDT_USER_CODE | 3)
+#define USER_SS (GDT_USER_DATA | 3)
+#define SYSCALL_VECTOR 0x80
 
 #define IRQ_BASE 0x20
 #define IRQ_TIMER 0
@@ -25,8 +30,14 @@ struct interrupt_frame {
 typedef void (*irq_handler_t)(void);
 
 void gdt_init(void);
+void gdt_set_kernel_stack(uint64_t rsp0);
 void idt_init(void);
+void idt_reload(void); /* loads the shared IDT on this CPU */
 void irq_install(unsigned irq, irq_handler_t h);
+/* Unmasks an ISA IRQ on whichever controller is active (PIC or IOAPIC). */
+void irq_enable(unsigned irq);
+/* Handler for a CPU-local vector (LAPIC timer, IPIs); EOI is sent after it. */
+void vector_install(unsigned vector, irq_handler_t h);
 uint64_t interrupt_spurious_count(void);
 uint64_t interrupt_unexpected_count(void);
 
@@ -36,6 +47,7 @@ struct cpu_features {
 };
 extern struct cpu_features g_cpu;
 void cpu_detect(void);
+void cpu_enable_sse(void); /* FXSAVE/SSE for user code */
 
 /* Switches to a new stack and calls fn(); never returns. (entry.S) */
 NORETURN void switch_stack_and_call(uint64_t stack_top, void (*fn)(void));

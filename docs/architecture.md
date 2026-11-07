@@ -1,9 +1,11 @@
 # Architecture
 
-Aurora 0.1 is a single-address-space, single-CPU x86-64 kernel. The desktop
-and its four applications are compiled into the kernel and driven by one
-cooperative event loop. **This is not a process scheduler**: there are no
-processes, no ring 3, no isolation. A fault in any app is a kernel fault.
+Aurora 0.5 is an SMP x86-64 kernel (1–16 CPUs; see [smp.md](smp.md)) with preemptively scheduled,
+isolated user processes (ring 3, one address space each; see
+[processes.md](processes.md)). The desktop and its four applications are
+still compiled into the kernel and run as kernel task 0. A fault in a user
+process kills only that process; a fault in kernel code (including the apps)
+is still a kernel panic.
 
 ```
  Limine (UEFI or BIOS) ──► _start (entry.S) ──► kmain_early (Limine stack)
@@ -12,9 +14,14 @@ processes, no ring 3, no isolation. A fault in any app is a kernel fault.
         pmm_init (bitmap) ─► vmm_init (own page tables, CR3 switch)
    switch_stack_and_call(guarded kernel stack) ──► kmain_stage2
         reclaim bootloader memory ─► heap ─► self-tests
+        scheduler (task 0 = this stack, idle task) ─► BKL
         PIC remap + LAPIC virtual wire ─► PIT 250 Hz ─► PS/2 ─► sti
+        ACPI tables ─► LAPIC + IOAPIC (PIC masked) ─► LAPIC timer
+        ─► start APs (INIT-SIPI-SIPI) ─► SCI/power button ─► PCI scan
         VFS: /system (initramfs, RO) + /home (ramfs, RW)
-        AURORA_BOOT_OK ─► desktop_main (never returns)
+        virtio-blk found? ─► /home moves onto PFS on the data disk
+        virtio-net found? ─► network task (DHCP)
+        AURORA_BOOT_OK ─► desktop_main (task 0; never returns)
 ```
 
 ## Source layout
@@ -22,10 +29,15 @@ processes, no ring 3, no isolation. A fault in any app is a kernel fault.
 | Directory | Contents |
 |---|---|
 | `kernel/arch/x86_64/` | entry, GDT/TSS, IDT, interrupt stubs + dispatch, page tables, CPUID, port I/O |
-| `kernel/core/` | boot-info validation, logging/test markers, panic, event queues, main |
+| `kernel/core/` | boot-info validation, logging/test markers, panic, event queues, scheduler, processes, syscalls, ELF validation, main |
+| `kernel/net/` | protocol parsing (portable), ARP/IPv4/ICMP/UDP/DHCP/DNS stack, TCP |
+| `kernel/include/abi/` | the user/kernel ABI shared with `user/` |
+| `user/libc/` | Aurora's libc layer over newlib: crt0, start-up, system-call wrappers, pthreads, locks, posix_spawn, termios; header overrides (0.6) |
+| `user/bin/` | the programs in `/system/bin`: shell, utilities, tests, network tools |
+| `tools/userland.py` | builds the sysroot (newlib, libc layer) and Lua (0.6) |
 | `kernel/memory/` | bitmap physical allocator, virtual layout, heap core + kernel heap |
-| `kernel/drivers/` | serial, framebuffer, PIC/LAPIC virtual wire, PIT, PS/2 controller, keyboard & mouse decoders |
-| `kernel/fs/` | path rules, VFS core + open-file table, ramfs and read-only backends, initramfs parser |
+| `kernel/drivers/` | serial, framebuffer, PIC, LAPIC + IOAPIC, PIT, PS/2 controller (+ Caps Lock LED), keyboard & mouse decoders, ACPI tables (portable parser) + power, PCI, VirtIO core, virtio-blk, virtio-net |
+| `kernel/fs/` | path rules, VFS core + open-file table, ramfs and read-only backends, initramfs parser, PFS (persistent, copy-on-write) |
 | `kernel/graphics/` | rect math, surfaces + primitives, compositor, diagnostic console |
 | `kernel/desktop/` | theme/wallpaper/icons, window manager, widgets, desktop shell (menus, dock, input routing, loop) |
 | `kernel/apps/` | Terminal (+ command parser), Files, Notes (+ text buffer), Settings/About, Welcome |
@@ -33,7 +45,8 @@ processes, no ring 3, no isolation. A fault in any app is a kernel fault.
 | `tests/host/` | host-side unit tests for the portable modules |
 
 Modules marked portable (decoders, event queues, rect math, VFS, initramfs,
-cmdline, textbuf, heap core, pmm core, formatter) contain no hardware access
+cmdline, textbuf + clipboard, heap core, pmm core, formatter, ELF validator,
+PFS, network protocol parsing) contain no hardware access
 and are compiled unchanged into the host tests.
 
 ## Interrupt flow
@@ -43,14 +56,23 @@ and are compiled unchanged into the host tests.
    alike: `[r15..rax][vector][error][rip cs rflags rsp ss]`.
 2. `isr_common` saves all GPRs, clears DF, re-aligns RSP to 16 bytes and
    calls `interrupt_dispatch(frame)`.
-3. Vectors 0–31 → `panic_exception` (fatal in 0.1). #DF runs on IST1 and
-   NMI/#MC on IST2, so a stack overflow into the guard page still reports.
-4. Vectors 0x20–0x2F → spurious check (IRQ7/15 ISR read) → registered
+3. Vectors 0–31: taken in user mode (CS RPL 3) → page faults inside a
+   region are resolved (demand paging, copy-on-write); anything else becomes
+   a signal for the thread (`process_user_exception`); taken in kernel mode → `panic_exception`. #DF runs on IST1 and
+   NMI/#MC on IST2 (per CPU), so a stack overflow into the guard page still
+   reports. Entries from ring 3 execute SWAPGS first (per-CPU data).
+   Vector 0x80 (DPL 3 gate) → `syscall_dispatch`.
+4. Vectors 0x20–0x2F (PIC until the IOAPIC takes over, then IOAPIC → LAPIC
+   EOI; 0x40–0x43 are LAPIC timer and IPIs) → spurious check (IRQ7/15 ISR read) → registered
    handler → EOI (slave then master for IRQ ≥ 8).
 
-All IDT entries are interrupt gates, so IF is clear inside handlers. Handlers
-are short: PIT increments a 64-bit tick counter; PS/2 reads bytes and pushes
-them to bounded rings. No allocation, rendering or file I/O in IRQ context.
+All IDT entries are interrupt gates, so IF is clear inside handlers (the
+syscall handler re-enables interrupts). Handlers are short: PIT increments a
+64-bit tick counter and calls `sched_tick`; PS/2 reads bytes, pushes them to
+bounded rings and wakes the desktop task. No allocation, rendering or file I/O
+in IRQ context. After EOI, a return to user mode (or idle) may switch tasks,
+and every return to user mode runs `signal_return_to_user` (signal
+delivery, thread exit).
 
 ## Event handling
 
@@ -60,11 +82,12 @@ main loop  ─► kbd/mouse decoders ─► event_queue (256 events, motion coal
            ─► desktop: shortcuts, menus, dock, window hit-testing, focus,
               drag capture ─► focused window's key()/mouse() callbacks
            ─► app ticks (250 ms) ─► wm_render_dirty ─► compositor_frame
-           ─► cli; if (no work) sti;hlt else sti   (race-free idle)
+           ─► cli; if (no work) sched_block() else sti
 ```
 
-`sti; hlt` executes atomically (STI's interrupt shadow), so an interrupt that
-arrives after the "no work" check always wakes the halt.
+The desktop task blocks with interrupts disabled until the check is done;
+an IRQ that arrives afterwards marks it runnable, so no wake-up is lost. When
+no task is runnable the idle task runs `sti; hlt`.
 
 ## Memory ownership
 
@@ -104,6 +127,7 @@ which avoids callbacks touching destroyed windows.
 
 ## Storage model
 
-`/system` is the read-only initramfs; `/home` is a RAM filesystem seeded from
-the archive's `home/` entries at boot. **Files are stored in memory and reset
-when Aurora restarts.** See [filesystem.md](filesystem.md).
+`/system` is the read-only initramfs. `/home` lives on PFS on the VirtIO data
+disk when one is attached, and survives restarts. Otherwise it is a RAM
+filesystem seeded from the archive and **reset when Aurora restarts**. See
+[filesystem.md](filesystem.md) and [networking.md](networking.md).

@@ -1,5 +1,9 @@
 # Aurora OS — implementation plan (release 0.1)
 
+> Historical: this is the original 0.1 plan. Releases 0.2–0.4 (processes,
+> persistent storage, networking) are described in `docs/roadmap.md`,
+> `docs/processes.md`, `docs/filesystem.md` and `docs/networking.md`.
+
 Aurora OS is an original, experimental x86-64 operating system with a desktop
 inspired by the restraint of classic desktop UIs. It is **not** macOS and has no
 compatibility with Apple software or hardware.

@@ -191,7 +191,8 @@ static void render(struct window *w, struct surface *s)
     char foot[96];
     k_snprintf(foot, sizeof foot, "%d item%s%s", F.n, F.n == 1 ? "" : "s", F.truncated ? " (list truncated)" : "");
     draw_text(s, FONT, lx + 12, fy + 5, foot, t->text_dim);
-    const char *loc = F.dir_ro ? "Read-only" : "RAM storage - resets on restart";
+    bool on_disk = vfs_home_persistent() && str_starts_with(F.path, "/home");
+    const char *loc = F.dir_ro ? "Read-only" : on_disk ? "Data disk - persistent" : "RAM storage - resets on restart";
     if (F.err == VFS_OK)
         widget_badge(s, lx + lw - 16 - text_width(FONT, loc) - 12, fy + 4, loc,
                      F.dir_ro ? t->warning_bg : t->selection, F.dir_ro ? t->warning_text : t->sel_text);

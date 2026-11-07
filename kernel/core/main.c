@@ -15,8 +15,19 @@
 #include "memory/virtual.h"
 #include "memory/heap.h"
 #include "fs/vfs.h"
+#include "core/sched.h"
+#include "core/process.h"
+#include "core/spinlock.h"
+#include "net/net.h"
+#include "drivers/pci.h"
+#include "drivers/blk.h"
+#include "drivers/acpi.h"
+#include "drivers/apic.h"
+#include "arch/smp.h"
+#include "memory/tlb.h"
 #include "desktop/desktop.h"
 #include "lib.h"
+void panic_halt_ipi(void);
 #include "limine.h"
 
 NORETURN void kmain_early(void);
@@ -92,6 +103,7 @@ void kmain_early(void)
     }
 
     cpu_detect();
+    cpu_enable_sse();
     klog("cpu: %s nx=%d pat=%d apic=%d x2apic=%d", g_cpu.vendor, g_cpu.nx, g_cpu.pat, g_cpu.apic, g_cpu.x2apic);
     gdt_init();
     idt_init();
@@ -115,6 +127,8 @@ static NORETURN void kmain_stage2(void)
     kheap_init();
     selftest_heap();
     klog("AURORA_MILESTONE memory");
+    sched_init();
+    bkl_lock(); /* the desktop task (this context) runs kernel code under the BKL */
 
     pic_init();
     lapic_virtual_wire(g_vmm.lapic);
@@ -127,6 +141,18 @@ static NORETURN void kmain_stage2(void)
     if (time_ticks() < t0 + 3)
         panic("timer: PIT interrupts are not arriving");
     klog("timer: PIT %u Hz (divisor %u), ticks advancing", PIT_TARGET_HZ, pit_divisor());
+    if (!acpi_init())
+        klog("acpi: not available; power-off falls back to the QEMU PM port");
+    if (apic_init()) {
+        vector_install(APIC_TIMER_VECTOR, apic_timer_tick);
+        vector_install(IPI_RESCHED_VECTOR, sched_resched_ipi);
+        vector_install(IPI_TLB_VECTOR, tlb_ipi_handler);
+        vector_install(IPI_HALT_VECTOR, panic_halt_ipi);
+        if (!apic_timer_start())
+            klog("apic: LAPIC timer unusable; the PIT keeps driving the scheduler");
+        smp_init();
+    }
+    acpi_setup_sci();
     klog("AURORA_MILESTONE interrupts");
 
 #ifdef AURORA_PANIC_TEST
@@ -134,6 +160,7 @@ static NORETURN void kmain_stage2(void)
     *(volatile uint32_t *)0 = 0xDEAD;
 #endif
 
+    process_init_clock();
     vfs_init();
     const struct boot_module *initrd = NULL;
     for (size_t i = 0; i < g_boot.module_count; i++)
@@ -149,10 +176,23 @@ static NORETURN void kmain_stage2(void)
             klog("vfs: initramfs %s (%llu bytes) mounted at /system, seeded /home", initrd->path,
                  (unsigned long long)initrd->size);
     }
+    pci_init();
+    if (vblk_init()) {
+        bool formatted = false;
+        int pr = vfs_attach_persistent(vblk_blockdev(), &formatted);
+        if (pr == VFS_OK)
+            klog("vfs: /home is on the data disk (%s)", formatted ? "blank disk formatted" : "existing files loaded");
+        else
+            klog("vfs: warning: data disk not used (%s); /home stays in RAM", vfs_strerror(pr));
+    } else {
+        klog("vfs: no data disk; /home is RAM-backed");
+    }
     struct vfs_stat st;
     if (vfs_stat("/home/notes", &st) != VFS_OK)
         vfs_mkdir("/home/notes");
     klog("AURORA_MILESTONE vfs");
+    net_init();
+    process_start_init();
 
     klog("AURORA_BOOT_OK");
     desktop_main();

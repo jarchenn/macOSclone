@@ -11,6 +11,7 @@
 #include "arch/cpu.h"
 #include "arch/x86_64/io.h"
 #include "core/log.h"
+#include "core/sched.h"
 
 #define DATA 0x60
 #define STATUS 0x64
@@ -102,6 +103,27 @@ static bool dev_send(bool aux, uint8_t v)
     return false;
 }
 
+static uint32_t led_updates;
+uint32_t ps2_led_updates(void) { return led_updates; }
+
+void ps2_set_leds(bool caps)
+{
+    if (!have_kbd)
+        return;
+    /* Bit 2 = Caps Lock. The keyboard ACKs each byte with 0xFA, which the
+     * decoder discards; we only wait for the input buffer to drain. */
+    uint64_t f = irq_save();
+    if (wait_write()) {
+        outb(DATA, 0xED);
+        if (wait_write()) {
+            outb(DATA, caps ? 0x04 : 0x00);
+            led_updates++;
+            TEST_EVENT("KBD_LEDS caps=%d n=%u", caps ? 1 : 0, led_updates);
+        }
+    }
+    irq_restore(f);
+}
+
 static void kbd_irq(void)
 {
     for (int i = 0; i < 16; i++) {
@@ -111,6 +133,7 @@ static void kbd_irq(void)
         uint8_t b = inb(DATA);
         byte_ring_push((st & ST_AUX) ? &mouse_ring : &kbd_ring, b);
     }
+    sched_wake(sched_desktop()); /* input is handled by the desktop task */
 }
 
 static void mouse_irq(void) { kbd_irq(); /* same routing logic */ }
@@ -198,10 +221,10 @@ bool ps2_init(void)
     ctrl_write_data((uint8_t)cfg);
 
     irq_install(IRQ_KEYBOARD, kbd_irq);
-    pic_unmask(IRQ_KEYBOARD);
+    irq_enable(IRQ_KEYBOARD);
     if (have_mouse) {
         irq_install(IRQ_MOUSE, mouse_irq);
-        pic_unmask(IRQ_MOUSE);
+        irq_enable(IRQ_MOUSE);
     }
     klog("ps2: keyboard %s, mouse %s (3-byte packets)", have_kbd ? "ok" : "missing", have_mouse ? "ok" : "missing");
     return have_kbd;

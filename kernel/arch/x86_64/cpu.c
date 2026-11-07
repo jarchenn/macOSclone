@@ -4,6 +4,19 @@
 
 struct cpu_features g_cpu;
 
+void cpu_enable_sse(void)
+{
+    /* CR0: MP set, EM and TS clear (no lazy FPU switching); CR4: OSFXSR and
+     * OSXMMEXCPT so user code may use SSE and get #XM for unmasked faults.
+     * APs copy CR0/CR4 from the boot CPU (smp.c). */
+    uint64_t cr0 = read_cr0();
+    cr0 = (cr0 | (1ull << 1)) & ~((1ull << 2) | (1ull << 3));
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0) : "memory");
+    uint64_t cr4 = read_cr4() | (1ull << 9) | (1ull << 10);
+    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
+    __asm__ volatile("fninit");
+}
+
 void cpu_detect(void)
 {
     uint32_t a, b, c, d;

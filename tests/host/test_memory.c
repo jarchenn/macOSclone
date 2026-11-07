@@ -155,6 +155,12 @@ TEST(pmm_alloc_free)
     CHECK(pmm_core_is_used(&p, 0x9F000));          /* reserved */
     CHECK(pmm_core_is_used(&p, 0x400000));         /* reclaimable until released */
     CHECK(pmm_core_is_used(&p, 0x580000));         /* partial page never usable */
+    /* low-memory claim for the SMP trampoline */
+    phys_addr_t low = pmm_core_claim_below(&p, 0x8000, 0x9F000);
+    CHECK(low >= 0x8000 && low < 0x9F000 && (low & 0xFFF) == 0);
+    CHECK(pmm_core_is_used(&p, low));
+    CHECK(pmm_core_claim_below(&p, 0x9F000, 0x100000) == 0); /* reserved range */
+    CHECK_EQ(pmm_core_free(&p, low), PMM_OK);
     /* allocate everything, every page unique and in a usable region */
     uint64_t count = 0;
     phys_addr_t a;

@@ -55,6 +55,7 @@ struct boot_info {
     struct boot_framebuffer fb;
     size_t module_count;
     struct boot_module modules[BOOT_MAX_MODULES];
+    phys_addr_t rsdp_phys; /* 0 if the firmware has no ACPI */
 };
 
 extern struct boot_info g_boot;

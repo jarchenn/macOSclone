@@ -35,5 +35,21 @@ void vmm_init(void);
 /* Maps `bytes` (page multiple) of fresh zeroed RAM at va. */
 bool vmm_map_fresh(uint64_t va, size_t bytes);
 uint64_t vmm_translate(uint64_t va);
+/* Maps device memory (uncached) into the MMIO window; NULL on failure. */
+void *vmm_map_mmio(phys_addr_t pa, size_t bytes, bool writable);
+/* Diagnostics: one kernel test page (TLB shootdown test). */
+uint64_t vmm_test_page_map(void);
+void vmm_test_page_unmap(bool shootdown);
+
+/* Address spaces: a PML4 whose upper half is shared with the kernel. */
+#define KSTACK_SIZE (32 * 1024)
+phys_addr_t vmm_kernel_space(void);
+uint64_t *vmm_space_create(phys_addr_t *phys_out);
+uint64_t vmm_space_destroy(uint64_t *pml4, phys_addr_t phys); /* returns user pages freed */
+bool vmm_map_user(uint64_t *pml4, uint64_t va, phys_addr_t pa, bool writable, bool executable);
+uint64_t vmm_user_pte(uint64_t *pml4, uint64_t va);
+/* Per-task kernel stacks with an unmapped guard page below each. */
+uint64_t vmm_kstack_alloc(int slot); /* returns stack top or 0 */
+void vmm_kstack_free(int slot);
 
 #endif

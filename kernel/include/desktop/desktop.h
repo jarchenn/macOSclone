@@ -99,6 +99,11 @@ void wm_invalidate(struct window *w);
 void wm_invalidate_all(void);
 void wm_set_title(struct window *w, const char *title);
 void wm_move(struct window *w, int32_t x, int32_t y);
+/* Resizes a normal window (frame size, title bar included). */
+bool wm_resize(struct window *w, int32_t width, int32_t height);
+#define WM_GRIP 16
+#define WM_MIN_W 320
+#define WM_MIN_H 180
 struct rect wm_content_rect(const struct window *w);
 struct rect wm_damage_rect(const struct window *w);
 void wm_render_dirty(void);
@@ -116,6 +121,7 @@ int32_t desktop_width(void);
 int32_t desktop_height(void);
 struct rect dock_rect(void);
 void desktop_request_reboot(void);
+void desktop_request_poweroff(void);
 void desktop_input_stats(uint32_t *dropped, uint32_t *coalesced);
 void desktop_main(void);
 

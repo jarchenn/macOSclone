@@ -1,6 +1,7 @@
 # Input, timing and interrupts
 
-The reference machine uses legacy devices: 8259 PIC pair, 8253/8254 PIT and
+(Since 0.5, ISA IRQs move from the 8259 PIC to the IOAPIC once ACPI is parsed;
+see [smp.md](smp.md).) The reference machine uses legacy devices: 8259 PIC pair, 8253/8254 PIT and
 the i8042 PS/2 controller. APIC/IOAPIC support is roadmap work; the only APIC
 code in 0.1 puts the local APIC into virtual-wire mode (see boot.md).
 
@@ -55,8 +56,9 @@ Home/End, PgUp/PgDn, Insert/Delete, right Ctrl/Alt, GUI, keypad Enter and /),
 the `E1` Pause sequence, "fake shift" `E0 2A/AA`, both Shift/Ctrl/Alt keys
 independently (no stuck modifiers when one is released) and Caps Lock (toggles
 once per physical press, ignores typematic repeats, affects letters only).
-Keypad navigation keys work as arrows (NumLock is not tracked). Keyboard LEDs
-are not updated.
+Keypad navigation keys work as arrows (NumLock is not tracked). The desktop
+drives the Caps Lock LED (`ED` command, bounded waits); Num/Scroll Lock LEDs
+are not tracked.
 
 ## Mouse
 
@@ -66,7 +68,8 @@ byte must have bit 3 set, otherwise it is skipped; a partial packet older than
 overflow bit is set the motion is discarded and buttons kept. Y is inverted
 for screen coordinates. The cursor is clamped to the screen. No acceleration
 is applied, which keeps test positioning deterministic. Left button: click,
-drag; right button and wheel are not used.
+drag (title bar to move, lower-right grip to resize, text in Notes to select);
+right button and wheel are not used.
 
 ## Event queue and routing
 
@@ -85,6 +88,11 @@ still full, new events are dropped and counted. The desktop then routes:
 
 ```
 cli
-if (no bytes in rings, no queued events, no damage) sti; hlt
-else sti
+if (no bytes in rings, no queued events, no damage) sched_block(until next 250 ms tick)
+sti
 ```
+
+The desktop is task 0. Blocking with interrupts off and being woken by the
+PS/2 IRQ (or by a process writing to the Terminal) means no input is missed.
+User processes and the network task run while it sleeps; the idle task halts
+with `sti; hlt` when nothing is runnable.

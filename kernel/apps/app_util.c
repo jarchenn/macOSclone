@@ -2,6 +2,7 @@
 #include "desktop/desktop.h"
 #include "core/boot.h"
 #include "limine.h"
+#include "fs/vfs.h"
 #include "lib.h"
 
 const char *app_firmware_name(void)
@@ -12,6 +13,12 @@ const char *app_firmware_name(void)
     case LIMINE_FIRMWARE_TYPE_EFI32: return "UEFI (32-bit)";
     default: return "unknown";
     }
+}
+
+const char *app_storage_note(void)
+{
+    return vfs_home_persistent() ? "Files in /home are saved to the data disk and survive restarts."
+                                 : "Files are stored in memory and reset when Aurora restarts.";
 }
 
 int32_t app_draw_wrapped(struct surface *s, const struct font_data *f, int32_t x, int32_t y, int32_t w,

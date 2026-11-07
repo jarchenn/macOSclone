@@ -16,6 +16,12 @@ struct fs_backend {
     int (*truncate)(struct vfs_node *node, uint32_t size);
     /* Replace the whole content atomically. */
     int (*replace)(struct vfs_node *node, const void *buf, uint32_t n);
+    /* Optional: called before a node is unlinked (frees backend storage). */
+    int (*remove)(struct vfs_node *node);
+    /* Optional: metadata changed (rename) - persistent backends record it. */
+    void (*changed)(struct vfs_node *node);
+    /* Optional: make all changes durable. */
+    int (*sync)(void);
 };
 
 struct vfs_node {
@@ -28,6 +34,14 @@ struct vfs_node {
     uint8_t *data;
     uint32_t size;
     uint32_t capacity; /* bytes owned by the node (0 for initramfs data) */
+    /* Persistent backend bookkeeping (PFS extent of the committed copy). */
+    uint32_t disk_start, disk_blocks, disk_crc;
+    bool dirty;
+    /* 0.6 metadata */
+    uint16_t mode;
+    uint32_t uid, gid;
+    uint32_t ino;
+    int64_t mtime;
 };
 
 extern const struct fs_backend ramfs_backend;

@@ -19,6 +19,7 @@ REQ struct limine_hhdm_request hhdm_req = { .id = LIMINE_HHDM_REQUEST_ID, .revis
 REQ struct limine_framebuffer_request fb_req = { .id = LIMINE_FRAMEBUFFER_REQUEST_ID, .revision = 0 };
 REQ struct limine_memmap_request memmap_req = { .id = LIMINE_MEMMAP_REQUEST_ID, .revision = 0 };
 REQ struct limine_module_request module_req = { .id = LIMINE_MODULE_REQUEST_ID, .revision = 0 };
+REQ struct limine_rsdp_request rsdp_req = { .id = LIMINE_RSDP_REQUEST_ID, .revision = 0 };
 REQ struct limine_executable_address_request kaddr_req = { .id = LIMINE_EXECUTABLE_ADDRESS_REQUEST_ID, .revision = 0 };
 REQ struct limine_paging_mode_request paging_req = {
     .id = LIMINE_PAGING_MODE_REQUEST_ID, .revision = 0,
@@ -131,6 +132,11 @@ void boot_collect(void)
         if (f->memory_model != LIMINE_FRAMEBUFFER_RGB)
             panic("boot: framebuffer memory model %u unsupported", f->memory_model);
     }
+
+    /* Base revision >= 4 returns the RSDP as an HHDM pointer. */
+    struct limine_rsdp_response *rr = rsdp_req.response;
+    if (rr && rr->address)
+        g_boot.rsdp_phys = virt_to_phys_hhdm(rr->address);
 
     struct limine_module_response *mr = module_req.response;
     if (mr && mr->modules) {

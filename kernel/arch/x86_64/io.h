@@ -17,6 +17,14 @@ static inline uint16_t inw(uint16_t port)
     __asm__ volatile("inw %1, %0" : "=a"(v) : "Nd"(port));
     return v;
 }
+static inline void outl(uint16_t port, uint32_t v) { __asm__ volatile("outl %0, %1" : : "a"(v), "Nd"(port)); }
+static inline uint32_t inl(uint16_t port)
+{
+    uint32_t v;
+    __asm__ volatile("inl %1, %0" : "=a"(v) : "Nd"(port));
+    return v;
+}
+static inline void outl_cf8(uint32_t v) { outl(0xCF8, v); }
 /* ~1us delay on PC hardware: write to an unused diagnostic port. */
 static inline void io_wait(void) { outb(0x80, 0); }
 
@@ -77,6 +85,7 @@ static inline uint64_t rdtsc(void)
 
 #define MSR_APIC_BASE 0x1B
 #define MSR_EFER 0xC0000080
+#define MSR_FS_BASE 0xC0000100
 #define MSR_PAT 0x277
 
 #endif

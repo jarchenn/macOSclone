@@ -39,11 +39,40 @@ isr_common:
     push %r14
     push %r15
     cld                         /* SysV ABI requires DF = 0 on C entry */
+    /* GS: switch to the kernel's per-CPU base when coming from ring 3
+     * (see arch/percpu.h). r12 remembers whether SWAPGS ran; it is
+     * callee-saved, so it survives a task switch inside the handler, and
+     * every CPU is in the same GS state while in the kernel. */
+    xor %r12d, %r12d
+    mov 120(%rsp), %rax         /* vector */
+    cmp $2, %rax
+    je 2f
+    cmp $8, %rax
+    je 2f
+    cmp $18, %rax
+    je 2f
+    testb $3, 144(%rsp)         /* saved CS: from user mode? */
+    jz 3f
+    swapgs
+    mov $1, %r12d
+    jmp 3f
+2:  /* NMI, #DF, #MC: trust the MSR, not CS (kernel GS has the top bit set) */
+    mov $0xC0000101, %ecx
+    rdmsr
+    test %edx, %edx
+    js 3f
+    swapgs
+    mov $1, %r12d
+3:
     mov %rsp, %rdi              /* struct interrupt_frame * */
     mov %rsp, %rbx              /* rbx is callee-saved: survives the call */
     and $-16, %rsp
     call interrupt_dispatch
     mov %rbx, %rsp
+    test %r12d, %r12d
+    jz 4f
+    swapgs
+4:
     pop %r15
     pop %r14
     pop %r13

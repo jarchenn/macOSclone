@@ -10,6 +10,8 @@ void pic_unmask(unsigned irq);
 void pic_mask(unsigned irq);
 void pic_eoi(unsigned irq);
 bool pic_is_spurious(unsigned irq);
+uint16_t pic_enabled_mask(void); /* IRQs currently unmasked */
+void pic_mask_all(void);
 
 /* Configure the local APIC for virtual-wire mode. Requires the LAPIC MMIO
  * page to be mapped (see vmm) unless the CPU is in x2APIC mode. */

@@ -15,6 +15,7 @@ import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.stdout.reconfigure(errors="replace")  # guest output may contain any bytes
 import aurora_env as env  # noqa: E402
 from qemu_harness import Guest, GuestError  # noqa: E402
 
@@ -594,6 +595,285 @@ def s_soak(d, seconds):
     return f"{seconds}s, {n} random actions, no panic/reset"
 
 
+# ---- 0.2: user processes ----------------------------------------------------
+
+def term_focus(d):
+    since = d.g.mark()
+    d.dock_click("Terminal")
+    d.wait_focus("Terminal", since)
+
+
+def s_user_programs(d):
+    term_focus(d)
+    d.terminal("hello alpha beta", r"@@TERM Hello from user space! pid=\d+ argc=3 \[alpha\] \[beta\]")
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=hello status=0", timeout=10)
+    d.terminal("badptr", r"@@TERM badptr: 10/10 checks passed")
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=badptr status=0", timeout=10)
+    since = d.g.mark()
+    d.terminal("crash")
+    # 0.6: a fault is a signal; the wait status is the signal number.
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=crash status=11 reason=segmentation fault: write unmapped at 0 ", timeout=10, since=since)
+    for mode, sig, pat in (("kernel", 11, r"read denied at ffffffff80000000"), ("stack", 11, r"write unmapped at 7fff"),
+                           ("ud", 4, r"invalid opcode"), ("gp", 11, r"general protection fault")):
+        since = d.g.mark()
+        d.terminal(f"crash {mode}")
+        d.g.wait_for(rf"@@PROC_EXIT pid=\d+ name=crash status={sig} reason=.*" + pat, timeout=10, since=since)
+    # the kernel and desktop are still fine
+    d.terminal("uptime", r"@@TERM up \d+:\d\d:\d\d")
+    d.terminal("ls /system/bin", r"@@TERM spin ")
+    return "hello/badptr ran; 5 kinds of faults each killed only the faulting process"
+
+
+def s_memory_isolation(d):
+    term_focus(d)
+    since = d.g.mark()
+    d.terminal("memtest write SECRET-42 4000 &")
+    m = d.g.wait_for(r"@@TERM memtest: pid (\d+) wrote SECRET-42 at (0x[0-9a-f]+)", timeout=10, since=since)
+    writer, addr = m.group(1), m.group(2)
+    m2 = d.terminal("memtest read", r"@@TERM memtest: pid (\d+) reads (\S+) at (0x[0-9a-f]+)")
+    if m2.group(3) != addr or m2.group(2) != "untouched":
+        raise GuestError(f"isolation broken: reader saw {m2.group(2)!r} at {m2.group(3)} (writer {addr})")
+    since = d.g.mark()
+    d.terminal("memtest peek ffffffff80000000")
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=memtest status=11 reason=segmentation fault: read denied at ffffffff80000000", timeout=10, since=since)
+    d.terminal("memtest peek ffff800000100000")
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=memtest status=11 reason=segmentation fault: read denied at ffff800000100000", timeout=10, since=since)
+    d.g.wait_for(rf"@@TERM memtest: pid {writer} still sees SECRET-42", timeout=15, since=since)
+    d.g.wait_for(rf"@@PROC_EXIT pid={writer} name=memtest status=0", timeout=10, since=since)
+    return f"same VA {addr}: writer kept SECRET-42, reader saw its own 'untouched'; kernel/HHDM reads faulted"
+
+
+def s_concurrency(d):
+    term_focus(d)
+    since = d.g.mark()
+    d.terminal("spin &")
+    spin = d.g.wait_for(r"@@PROC_START pid=(\d+) name=spin", timeout=10, since=since).group(1)
+    d.terminal("counter 5 200 B &")
+    # The CPU hog does not starve sleeping programs or the desktop.
+    d.g.wait_for(r"@@TERM B 5\s*$", timeout=20, since=since)
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=counter status=0", timeout=10, since=since)
+    d.g.wait_for(r"@@TERM spin: \d+ M iterations after [2-9]\d\d\d ms", timeout=20, since=since)
+    s2 = d.g.mark()
+    d.dock_click("Files")
+    d.wait_focus("Files", s2)
+    term_focus(d)
+    ps_row = rf"@@TERM +{spin} +\d+ +\d+ +\d+ running +(\d+)"
+    d.terminal("ps", ps_row)
+    cpu = int(re.findall(ps_row, d.g.serial())[-1])
+    since = d.g.mark()
+    d.terminal(f"kill {spin}")
+    d.g.wait_for(rf"@@PROC_EXIT pid={spin} name=spin status=9 reason=killed by SIGKILL", timeout=10, since=since)
+    since = d.g.mark()
+    d.terminal("ps", r"@@TERM context switches:")
+    if re.search(rf"@@TERM +{spin} ", d.g.serial()[since:]):
+        raise GuestError("spin still listed after kill")
+    if not re.search(r"@@TERM +1 +0 +0 +1 running .* init", d.g.serial()[since:]):
+        raise GuestError("init (pid 1) missing from ps")
+    since = d.g.mark()
+    d.dock_click("Files")
+    d.wait_focus("Files", since)
+    since = d.g.mark()
+    d.g.key("ctrl", "w")  # close Files
+    d.g.wait_for(r"@@WIN_CLOSE id=\d+", timeout=10, since=since)
+    return f"spin used {cpu} ms CPU while counter finished and the desktop opened Files; kill worked"
+
+
+def s_crash_does_not_stop_others(d):
+    term_focus(d)
+    since = d.g.mark()
+    d.terminal("counter 8 250 C &")
+    d.g.wait_for(r"@@TERM C 2\s*$", timeout=10, since=since)
+    d.terminal("crash")
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=crash status=11", timeout=10, since=since)
+    d.g.wait_for(r"@@TERM C 8\s*$", timeout=15, since=since)
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=counter status=0", timeout=10, since=since)
+    return "counter kept running through another process's crash and exited 0"
+
+
+def s_stdin_and_shell(d):
+    """0.6: programs run on the Terminal's pty. The line discipline echoes
+    and edits input (Backspace), Ctrl+D is end-of-file, and Ctrl+C sends
+    SIGINT to the foreground process group: it kills a program running
+    under the shell while the shell survives."""
+    term_focus(d)
+    since = d.g.mark()
+    d.terminal("upper", r"@@TERM upper: type lines")
+    d.g.type_text("mixed Casx")
+    d.g.key("backspace")
+    d.g.type_text("e 123\n")
+    d.g.wait_for(r"@@TERM MIXED CASE 123\s*$", timeout=10, since=since)
+    d.g.key("ctrl", "d")
+    d.g.wait_for(r"@@TERM upper: 1 lines", timeout=10, since=since)
+    since = d.g.mark()
+    d.terminal("sh", r"@@TERM Aurora sh \(pid \d+\)")
+    time.sleep(0.5)  # the prompt is an unterminated line: no TERM marker
+    d.g.type_text("hello nested\n")
+    d.g.wait_for(r"@@TERM Hello from user space! pid=\d+ argc=2 \[nested\]", timeout=10, since=since)
+    d.g.type_text("cat /system/welcome.txt | grep -c Aurora\n")
+    d.g.wait_for(r"@@TERM [1-9]\d*\s*$", timeout=10, since=since)
+    # Ctrl+C kills the foreground program; the shell survives.
+    since = d.g.mark()
+    d.g.type_text("spin\n")
+    d.g.wait_for(r"@@PROC_EXEC pid=\d+ name=spin", timeout=10, since=since)
+    time.sleep(1.0)
+    d.g.key("ctrl", "c")
+    d.g.wait_for(r"@@PTY_SIGNAL pty=\d+ sig=2", timeout=10, since=since)
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=spin status=2 reason=killed by SIGINT", timeout=10, since=since)
+    since = d.g.mark()
+    d.g.type_text("echo still-here\n")
+    d.g.wait_for(r"@@TERM still-here\s*$", timeout=10, since=since)
+    d.g.type_text("exit\n")
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=sh status=0", timeout=10, since=since)
+    # Ctrl+C on a program started directly by the Terminal
+    since = d.g.mark()
+    d.terminal("spin")
+    d.g.wait_for(r"@@PROC_START pid=\d+ name=spin", timeout=10, since=since)
+    time.sleep(1.0)
+    d.g.key("ctrl", "c")
+    d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=spin status=2 reason=killed by SIGINT", timeout=10, since=since)
+    return ("pty echo + Backspace + Ctrl+D reached upper; sh ran a pipeline; Ctrl+C killed spin under sh "
+            "(SIGINT to the foreground group) and the shell kept working")
+
+
+def s_process_leaks(d):
+    term_focus(d)
+    m0 = d.terminal("mem", r"@@TERM Physical pages free: +(\d+) KiB")
+    before = int(m0.group(1))
+    for i in range(10):
+        since = d.g.mark()
+        d.terminal("hello leakcheck")
+        d.g.wait_for(r"@@PROC_EXIT pid=\d+ name=hello status=0", timeout=10, since=since)
+    m1 = d.terminal("mem", r"@@TERM Physical pages free: +(\d+) KiB")
+    after = int(m1.group(1))
+    if after < before - 64:
+        raise GuestError(f"physical memory leaked across 10 runs: {before} -> {after} KiB free")
+    return f"10 process lifetimes: free physical memory {before} -> {after} KiB"
+
+
+WM_MIN_W, WM_MIN_H = 320, 180  # kernel/include/desktop/desktop.h
+
+
+def s_window_resize(d):
+    open_notes_fresh(d)
+    w = d.window("Notes")
+    if w["state"] != "normal":
+        raise GuestError(f"Notes is {w['state']}")
+    gx, gy = w["x"] + w["w"] - 4, w["y"] + w["h"] - 4
+    results = []
+    for nw, nh in ((w["w"] - 120, w["h"] - 80), (WM_MIN_W, WM_MIN_H), (w["w"], w["h"])):
+        # the window's lower-right pixel lands under the cursor on release
+        tx, ty = w["x"] + nw - 1, w["y"] + nh - 1
+        if nw == WM_MIN_W:  # drag past the minimum: it clamps
+            tx, ty = w["x"] + 40, w["y"] + 40
+        since = d.g.mark()
+        d.drag(gx, gy, tx, ty)
+        m = d.g.wait_for(r"@@WIN id=\d+ app=Notes x=-?\d+ y=-?\d+ w=(\d+) h=(\d+) state=normal", timeout=10, since=since)
+        got = (int(m.group(1)), int(m.group(2)))
+        if got != (nw, nh):
+            raise GuestError(f"resize to {(nw, nh)} gave {got}")
+        results.append(got)
+        gx, gy = w["x"] + got[0] - 4, w["y"] + got[1] - 4
+    # the resized window still works
+    d.g.type_text("ok")
+    d.g.screendump(OUT / "resized.png")
+    since = d.g.mark()
+    d.g.key("ctrl", "n")
+    d.g.wait_for(r"@@NOTES_DIALOG unsaved", timeout=10, since=since)
+    d.g.key("d")
+    return f"grip drags gave {results} (minimum clamp {WM_MIN_W}x{WM_MIN_H})"
+
+
+CLIP_TEXT = "copy me please\nsecond line"
+
+
+def s_clipboard(d):
+    open_notes_fresh(d)
+    d.g.type_text(CLIP_TEXT)
+    # Shift+Home selects the last line; Ctrl+C copies it.
+    d.g.key("shift", "home")
+    since = d.g.mark()
+    d.g.key("ctrl", "c")
+    m = d.g.wait_for(r"@@CLIP_SET len=(\d+) crc=([0-9a-f]+)", timeout=10, since=since)
+    if (int(m.group(1)), m.group(2)) != (11, crc("second line")):
+        raise GuestError(f"copied {m.group(0)}, expected 'second line'")
+    # Typing replaces the selection; Ctrl+A, Ctrl+X empties the note.
+    d.g.type_text("2nd")
+    d.g.key("ctrl", "a")
+    since = d.g.mark()
+    d.g.key("ctrl", "x")
+    m = d.g.wait_for(r"@@CLIP_SET len=(\d+) crc=([0-9a-f]+)", timeout=10, since=since)
+    want = "copy me please\n2nd"
+    if (int(m.group(1)), m.group(2)) != (len(want), crc(want)):
+        raise GuestError(f"cut {m.group(0)}, expected {want!r}")
+    # Paste twice: the note must be exactly two copies.
+    d.g.key("ctrl", "v")
+    d.g.key("ctrl", "v")
+    m = save_as(d, "clip.txt")
+    if m.group(2) != "0" or int(m.group(3)) != 2 * len(want) or m.group(4) != crc(want + want):
+        raise GuestError(f"pasted note differs: {m.group(0)}")
+    # Mouse selection: double-click a word, then drag across a range.
+    def text_pt(col, row):  # kernel/apps/notes.c: PAD 14, text at TOOLBAR_H + 8, LINE_H 18
+        return d.content_point("Notes", 14 + 8 * col, TOOLBAR_H + 8 + 18 * row + 9)
+    d.click(*text_pt(1, 0), double=True)
+    since = d.g.mark()
+    d.g.key("ctrl", "c")
+    m = d.g.wait_for(r"@@CLIP_SET len=(\d+) crc=([0-9a-f]+)", timeout=10, since=since)
+    if (int(m.group(1)), m.group(2)) != (4, crc("copy")):
+        raise GuestError(f"double-click copied {m.group(0)}, expected 'copy'")
+    d.drag(*text_pt(5, 0), *text_pt(14, 0))
+    since = d.g.mark()
+    d.g.key("ctrl", "c")
+    m = d.g.wait_for(r"@@CLIP_SET len=(\d+) crc=([0-9a-f]+)", timeout=10, since=since)
+    if (int(m.group(1)), m.group(2)) != (9, crc("me please")):
+        raise GuestError(f"drag copied {m.group(0)}, expected 'me please'")
+    d.g.key("ctrl", "a")
+    since = d.g.mark()
+    d.g.key("ctrl", "c")  # restore the clipboard for the Terminal check
+    d.g.wait_for(r"@@CLIP_SET len=36 ", timeout=10, since=since)
+    # Terminal paste takes the first line only.
+    term_focus(d)
+    d.g.type_text("echo [")
+    since = d.g.mark()
+    d.g.key("ctrl", "v")
+    d.g.wait_for(r"@@TERM_PASTE added=14 ", timeout=10, since=since)
+    d.g.type_text("]\n")
+    d.g.wait_for(r"@@TERM \[copy me please\]\s*$", timeout=10, since=since)
+    d.terminal("rm /home/notes/clip.txt")
+    return (f"copy/cut/paste in Notes ({2 * len(want)} B saved, crc ok); double-click and drag selection; "
+            "Terminal pasted the first line")
+
+
+def s_caps_led(d):
+    term_focus(d)
+    d.g.type_text("echo ")
+    since = d.g.mark()
+    d.g.key("caps_lock")
+    d.g.wait_for(r"@@KBD_LEDS caps=1 ", timeout=10, since=since)
+    d.g.key("a")
+    d.g.key("b")
+    since2 = d.g.mark()
+    d.g.key("caps_lock")
+    d.g.wait_for(r"@@KBD_LEDS caps=0 ", timeout=10, since=since2)
+    d.g.type_text("c\n")
+    d.g.wait_for(r"@@TERM ABc\s*$", timeout=10, since=since)
+    return "Caps Lock set and cleared the keyboard LED; letters followed it"
+
+
+def s_poweroff(d):
+    term_focus(d)
+    since = d.g.mark()
+    d.g.type_text("poweroff\n")
+    d.g.wait_for(r"@@POWEROFF", timeout=10, since=since)
+    t0 = time.time()
+    while d.g.alive() and time.time() - t0 < 20:
+        time.sleep(0.1)
+    if d.g.alive():
+        raise GuestError("QEMU still running 20 s after poweroff")
+    if "acpi: entering S5" not in d.g.serial():
+        raise GuestError("power-off did not go through ACPI S5")
+    return f"ACPI S5: QEMU exited {time.time() - t0:.1f} s after the command"
+
+
 SCENARIOS = [
     ("launch-each-app", s_launch_each_app),
     ("drag-overlap-focus", s_drag_overlap_focus),
@@ -607,7 +887,17 @@ SCENARIOS = [
     ("cursor-edges", s_edges),
     ("menus", s_menus),
     ("open-close-memory", s_open_close_leak),
+    ("user-programs-and-faults", s_user_programs),
+    ("process-memory-isolation", s_memory_isolation),
+    ("preemptive-concurrency", s_concurrency),
+    ("crash-does-not-stop-others", s_crash_does_not_stop_others),
+    ("stdin-shell-ctrl-c", s_stdin_and_shell),
+    ("process-memory-reclaimed", s_process_leaks),
+    ("window-resize", s_window_resize),
+    ("clipboard-copy-paste", s_clipboard),
+    ("caps-lock-led", s_caps_led),
     ("reboot-resets-ramfs", s_reboot),
+    ("acpi-poweroff", s_poweroff),  # last: ends the guest
 ]
 
 
@@ -616,12 +906,13 @@ def main():
     ap.add_argument("--only", nargs="*")
     ap.add_argument("--soak", type=int, default=0, help="run only the soak test for N seconds")
     ap.add_argument("--memory", default="256M")
+    ap.add_argument("--smp", type=int, default=None)
     args = ap.parse_args()
     if not IMG.exists():
         sys.exit("error: build/test/aurora.img missing; run 'python tools/build.py build --variant test'")
     OUT.mkdir(parents=True, exist_ok=True)
     results = []
-    g = Guest(IMG, memory=args.memory, name="interaction", no_reboot=False, keep_dir=OUT / "interaction")
+    g = Guest(IMG, memory=args.memory, name="interaction", no_reboot=False, keep_dir=OUT / "interaction", smp=args.smp)
     try:
         g.start()
         d = Desktop(g)
