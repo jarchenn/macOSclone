@@ -140,3 +140,114 @@ the old one.
   are resolved under it (address spaces are BKL-protected). D-0.5-2's plan
   to move faults off the BKL is not done; it needs a per-address-space lock
   first.
+
+## D-0.7-1: the desktop leaves the kernel
+
+* **Choice:** the window manager, compositor, menu bar, dock and every app
+  are user processes. `init` starts `/system/bin/display` (the display
+  server) and restarts it when it exits (at most five starts a minute);
+  each app (`terminal`, `files`, `notes`, `settings`, `welcome`) is its own
+  process that connects to the server. The kernel keeps the framebuffer
+  driver, the diagnostic console (shown again when the server exits) and a
+  power task (task 0) for restart and power-off.
+* **Why:** the 0.7 prerequisites assume the 0.2 "desktop as a user-space
+  service", which 0.2 had deferred; the acceptance test "killing the
+  compositor leaves the kernel running and the session restartable" cannot
+  pass while the desktop is kernel code. Most of the 0.1 desktop code moved
+  as is (`git mv` into `user/gui`), so its behaviour and look carried over.
+
+## D-0.7-2: scan-out by the kernel from a shared buffer
+
+* **Choice:** the server composes into a shared-memory XRGB8888 buffer it
+  attaches to `/dev/display`; `AURORA_DISP_PRESENT` copies damaged
+  rectangles to the framebuffer, converting the pixel format there (the
+  roadmap's "one internal format, converting only at scan-out"). The
+  framebuffer itself is never mapped into user space.
+* **Why:** no device memory in user page tables (no cache-type handling,
+  no MMIO pages in the copy-on-write and release paths), and the copy is
+  the same one the 0.1 kernel compositor already made. The cursor is a
+  separate layer: the scene buffer is kept apart from the presented one, so
+  moving the cursor copies two small rectangles and redraws it.
+
+## D-0.7-3: local message sockets with descriptor passing
+
+* **Choice:** a kernel IPC primitive of its own: connected, message-
+  preserving sockets (`socketpair`, `listen`/`connect` on names in a small
+  kernel namespace, `accept`), `sendmsg`/`recvmsg` carrying up to 64 KiB and
+  8 descriptors per message. Names under `system.` can only be taken by
+  root. Local sockets cannot be sent through local sockets.
+* **Alternatives:** BSD `AF_UNIX` with paths in the VFS.
+* **Why:** the display protocol needs message boundaries and descriptor
+  passing (shared buffers), nothing more. Keeping names out of the VFS
+  avoids socket nodes in PFS; refusing sockets-in-sockets avoids the
+  reference cycles that Linux needs a garbage collector for.
+
+## D-0.7-4: shared-memory objects
+
+* **Choice:** `shm_create(size)` returns a descriptor; `mmap(MAP_SHARED)`
+  of it maps the same pages in every process; `MAP_SHARED|MAP_ANONYMOUS`
+  makes an unnamed object shared with children. Pages are allocated when
+  the object is created (at most 64 MiB) and are never copy-on-write.
+* **Why:** window buffers are written in full on every frame, so lazy
+  allocation would only move the cost; eager pages keep the fault path
+  simple (it maps the object's page). Page lifetime reuses the 0.6 share
+  counts: the object holds one reference per page, each mapping one more.
+
+## D-0.7-5: Bochs display adapter for mode setting
+
+* **Choice:** runtime resolution changes through the Bochs DISPI registers
+  of QEMU's standard VGA (`-vga std`), used only when its linear
+  framebuffer is the one the bootloader reported. Twelve modes from 800x600
+  to 2560x1440 are offered, filtered by video memory.
+* **Alternatives:** virtio-gpu 2D.
+* **Why:** the reference machine already uses `-vga std`; DISPI is a few
+  port writes, while virtio-gpu needs a virtqueue driver and its own
+  resource and scan-out management. Integer 2x scaling (optional in the
+  roadmap) is not implemented.
+
+## D-0.7-6: fonts
+
+* **Choice:** stb_truetype 1.26 (public domain, pinned to a commit and a
+  SHA-256) and DejaVu Sans, Sans Bold and Sans Mono 2.37 (Bitstream Vera /
+  DejaVu licence, pinned SHA-256). Glyphs are rasterized once per font and
+  size into a cache; anti-aliased coverage is blended in linear light;
+  pair kerning comes from the font's `kern`/`GPOS` data (proportional faces
+  only). The 0.1 Spleen bitmap fonts are the fallback when a font file
+  cannot be loaded.
+* **Why:** the roadmap's choice (stb_truetype first). Neither project
+  publishes a digest next to the download, so the pinned digests are those
+  of the files downloaded and inspected on 2026-11-06 (DEPENDENCIES.md).
+
+## D-0.7-7: keymaps, repeat and text input in the display server
+
+* **Choice:** `/dev/input` delivers raw scan codes; the server maps them
+  with layout files from `/system/keymaps` (US and US-International with
+  dead keys and an AltGr layer), repeats keys itself (configurable delay
+  and rate; the keyboard's own repeats are dropped) and sends apps both key
+  events and separate text events. The server also keeps the clipboard (its
+  own copy, so content outlives the app that copied it).
+* **Why:** the roadmap's "keymap files" and "text-input events separate
+  from key events so an input method can plug in later". One process owns
+  the keyboard state, so Caps Lock, dead keys and the LED stay consistent
+  across apps.
+
+## D-0.7-8: dialogs as sheets, apps single-instance
+
+* **Choice:** the open and save dialogs are modal sheets drawn inside the
+  app's window by the toolkit, not separate windows. Each app runs as one
+  process with one main window; launching it again (dock, shortcut, Files
+  opening a note) reaches the running instance.
+* **Why:** a sheet needs no window-to-window parent protocol and keeps the
+  dialog with its document. Single instances keep the 0.1 behaviour the
+  interaction tests expect (one Notes, one Terminal).
+
+## D-0.7-9: golden screenshots
+
+* **Choice:** `make desktop` compares regions of QEMU screendumps with PNGs
+  in `tests/golden/` (largest per-channel difference 8; at most 0.1 % of
+  the pixels may differ). `--update-goldens` regenerates them; regenerated
+  images are inspected by eye before they are committed.
+* **Why:** rendering is deterministic under TCG, so the tolerance only
+  absorbs differences in anti-aliasing should the code change slightly. The
+  goldens are produced by Aurora itself; they show that rendering does not
+  change unnoticed, not that it matches an external reference.

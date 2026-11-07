@@ -33,7 +33,7 @@ static void put_padded(struct out *o, const char *s, size_t n, int width, bool l
             put(o, ' ');
 }
 
-static size_t utoa(uint64_t v, unsigned base, bool upper, char *tmp)
+static size_t fmt_utoa(uint64_t v, unsigned base, bool upper, char *tmp)
 {
     const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
     char rev[24];
@@ -128,7 +128,7 @@ int k_vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap)
             size_t n = 0;
             if (neg)
                 num[n++] = '-';
-            n += utoa(u, 10, false, num + n);
+            n += fmt_utoa(u, 10, false, num + n);
             if (neg && padc == '0') {
                 put(&o, '-');
                 put_padded(&o, num + 1, n - 1, width - 1, left, padc);
@@ -142,7 +142,7 @@ int k_vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap)
         case 'X': {
             uint64_t v = lng ? va_arg(ap, uint64_t) : va_arg(ap, unsigned);
             unsigned base = *p == 'u' ? 10 : 16;
-            size_t n = utoa(v, base, *p == 'X', tmp);
+            size_t n = fmt_utoa(v, base, *p == 'X', tmp);
             put_padded(&o, tmp, n, width, left, padc);
             break;
         }
@@ -150,7 +150,7 @@ int k_vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap)
             uint64_t v = (uint64_t)(uintptr_t)va_arg(ap, void *);
             put(&o, '0');
             put(&o, 'x');
-            size_t n = utoa(v, 16, false, tmp);
+            size_t n = fmt_utoa(v, 16, false, tmp);
             put_padded(&o, tmp, n, 16, false, '0');
             break;
         }

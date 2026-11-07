@@ -45,7 +45,7 @@ getopt, fnmatch, `dirent` (on `getdents`) and libm. Aurora's layer
 | `locks.c` | newlib's retargetable locks (stdio, malloc, atexit, env) |
 | `spawn.c` | `posix_spawn`/`posix_spawnp` on SYS_SPAWN, `system()` |
 | `misc.c` | user table (`root`, `user`), `getline`, `flockfile`, `__errno` |
-| `aurora.c` | `<aurora.h>`: the 0.4 socket API on descriptors, `aurora_sysinfo` |
+| `aurora.c` | `<aurora.h>`: the 0.4 socket API on descriptors, `aurora_sysinfo`; 0.7: shared memory, local sockets, `aurora_spawn`, power, kernel statistics |
 | `abi_check.c` | build-time check that newlib's constants equal the kernel ABI |
 
 ## Process model (0.6c)
@@ -156,14 +156,17 @@ poll.
 | threads | thread_create, futex (wait/wake, timeout), set_fsbase | implemented |
 | groups/ids | setpgid, getpgid, setsid, getuid, getgid, setuid, setgid, umask | implemented (no saved/effective ids) |
 | time | nanosleep, clock_gettime (REALTIME from the RTC, MONOTONIC, process/thread CPU), uptime | implemented (4 ms resolution) |
-| memory | brk, mmap (anonymous, private file), munmap, mprotect | implemented; MAP_SHARED: ENOTSUP |
+| memory | brk, mmap (anonymous, private file), munmap, mprotect | implemented |
+| shared memory (0.7) | shm_create; mmap MAP_SHARED of an shm object, or MAP_SHARED\|MAP_ANONYMOUS (shared with children) | implemented; shared file mappings: ENOTSUP |
+| local IPC (0.7) | socketpair, local_listen, local_connect, accept, sendmsg, recvmsg (descriptor passing) | implemented (message sockets, own namespace; no BSD AF_UNIX) |
 | files | open, close, read, write, lseek, fstat, stat, getdents, truncate, ftruncate, chmod, fchmod, chown, access, sync, fsync | implemented |
 | directories | mkdir, rmdir, unlink, rename, chdir, getcwd | implemented; `fchdir` ENOSYS |
 | descriptors | dup, dup3, fcntl, pipe2, poll, ioctl (termios, window size, FIONREAD, process group) | implemented |
 | network | socket, connect, send, recv, resolve, bind, sendto, recvfrom, netinfo, ping | 0.4 API on descriptors (no BSD sockets) |
-| system | getrandom, sysinfo, uname | implemented (getrandom is not cryptographic) |
+| system | getrandom, sysinfo, uname; 0.7: power, klog, cpuinfo, proclist, test_event/testop (test builds) | implemented (getrandom is not cryptographic) |
 | links | link, symlink, readlink | not supported (EMLINK / ENOSYS / EINVAL) |
-| not present | shared memory, job control, ptrace, setitimer, chroot, mount, select as a system call (libc builds it on poll) | not implemented |
+| devices (0.7) | /dev/ptmx (pty masters), /dev/display, /dev/input, /dev/console | implemented (see docs/desktop.md) |
+| not present | job control, ptrace, setitimer, chroot, mount, select as a system call (libc builds it on poll) | not implemented |
 
 ## Limits
 

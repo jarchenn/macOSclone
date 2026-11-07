@@ -360,7 +360,7 @@ def build_ports(variant: str) -> dict:
     return {"lua": elf}
 
 
-def port_data() -> dict:
+def port_data(with_tests=True) -> dict:
     """Read-only data shipped in /system: the licenses of the code linked
     into user programs, and Lua's test suite (0.6)."""
     tests = fetch_deps.source_dir("lua-tests")
@@ -372,7 +372,16 @@ def port_data() -> dict:
     notice = notice[:notice.index("*/")]
     out["system/licenses/lua-LICENSE.txt"] = ("Lua 5.4.9 (https://www.lua.org), MIT license:\n\n" + "\n".join(
         line.lstrip("*").strip() for line in notice.splitlines()) + "\n").encode()
-    if (tests / ".verified").exists():
+    # 0.7: TrueType fonts and the rasterizer's licence text.
+    dejavu = fetch_deps.source_dir("dejavu")
+    for font in ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf", "DejaVuSansMono.ttf"):
+        out["system/fonts/" + font] = (dejavu / "ttf" / font).read_bytes()
+    out["system/licenses/dejavu-LICENSE.txt"] = (dejavu / "LICENSE").read_bytes()
+    stb = (fetch_deps.file_dir("stb_truetype") / "stb_truetype.h").read_text(errors="replace")
+    out["system/licenses/stb_truetype-LICENSE.txt"] = (
+        "stb_truetype.h v1.26 (https://github.com/nothings/stb), used under the public-domain\n"
+        "(Unlicense) alternative below:\n\n" + stb[stb.rindex("This software is available under 2 licenses"):]).encode()
+    if with_tests and (tests / ".verified").exists():
         for f in sorted(tests.rglob("*")):
             if f.is_file() and f.name != ".verified" and f.suffix in (".lua", ".c", ".txt", ".md", ""):
                 rel_p = f.relative_to(tests).as_posix()

@@ -5,8 +5,9 @@ software-rendered desktop. It has its own kernel (memory management,
 interrupts, an SMP scheduler for up to 16 CPUs, isolated user processes,
 ACPI and APIC support, drivers), a
 persistent filesystem on a VirtIO disk, an IPv4/TCP network stack, a
-compositor, a window manager and four built-in apps: **Terminal, Files, Notes
-and Settings/About**. It boots with the Limine bootloader and runs on emulated
+POSIX-ish userland, and a desktop that runs in user space: a display server
+(compositor and window manager) and four apps as separate processes,
+**Terminal, Files, Notes and Settings/About**, with TrueType text. It boots with the Limine bootloader and runs on emulated
 hardware in QEMU.
 
 Aurora is not macOS and has nothing to do with Apple software: it cannot run
@@ -18,6 +19,7 @@ macOS (or any other) programs, and all of its artwork is original.
 |---|---|
 | ![Notes reopened through Files](docs/screenshots/note-reopened.png) | ![Dark theme](docs/screenshots/theme-dark.png) |
 | ![About Aurora](docs/screenshots/about.png) | ![Kernel panic diagnostic](docs/screenshots/panic.png) |
+| ![Notes save dialog](docs/screenshots/save-dialog.png) | ![After switching to 800x600](docs/screenshots/relayout-800x600.png) |
 
 All screenshots are QEMU `screendump` captures of the guest framebuffer
 taken by the automated tests, not mockups.
@@ -72,23 +74,24 @@ In QEMU's default GTK window, click inside it to give the guest the mouse.
 * **Dock** (bottom): opens Terminal, Files, Notes, Settings. Clicking it again
   focuses the app, or restores it if minimized. A dot marks running apps.
 * **Windows**: drag them by the title bar and resize them with the grip in
-  the lower-right corner. Red closes, amber minimizes to the dock, green
+  the lower-right corner (each app has a minimum size). Red closes, amber minimizes to the dock, green
   maximizes or restores. Clicking a window raises and focuses it.
 * **Menu bar**: the Aurora menu (About, Settings, Welcome Guide, Dark/Light
   Appearance, Restart, Shut Down), the active app's menu (Minimize, Close, Next Window),
   and uptime since boot. This is not a clock.
 * **Shortcuts**:
-  * Ctrl+Tab: next window
+  * Alt+Tab (or Ctrl+Tab): next window
   * Ctrl+W: close window
   * Ctrl+M: minimize
   * Ctrl+1–4: open Terminal, Files, Notes or Settings
-  * Notes: Ctrl+S save, Ctrl+Shift+S save as, Ctrl+N new, Ctrl+O open;
+  * Notes: Ctrl+S save, Ctrl+Shift+S save as, Ctrl+N new, Ctrl+O open (file dialogs);
     Shift+arrows, mouse drag or double-click select; Ctrl+A/C/X/V
   * Terminal: Ctrl+V pastes the clipboard's first line, Ctrl+C stops the
     running program, Ctrl+D ends its input
 * **Terminal**: built-in commands (`help` lists them all), including
   `ls`, `cat`, `echo`, `write`, `mkdir`, `rm`, `mv`, `sync`, `df`, `ps`,
-  `kill`, `ifconfig`, `netstat`, `reboot` and `poweroff`. Any program in
+  `kill`, `ifconfig`, `netstat`, `display 1280x800`, `keymap us-intl`,
+  `reboot` and `poweroff`. Any program in
   `/system/bin` runs as an isolated user process on the Terminal's
   pseudo-terminal, for example `sh`, `lua`, `grep -n main file.c`,
   `ping 10.0.2.2`, `nslookup example.com` or `fetch http://example.com/`.
@@ -96,35 +99,43 @@ In QEMU's default GTK window, click inside it to give the guest the mouse.
   count.txt` works directly. Add `&` to run a program in the background.
 * **Files**: browses `/home`, `/home/notes`, `/system` and `/`. Double-click
   or Enter opens a folder or a text file (in Notes); Backspace goes up.
-* **Notes**: plain-text editor (16 KiB per note) that saves to
-  `/home/notes`. Closing with unsaved changes offers Save, Don't Save and
-  Cancel.
+* **Notes**: plain-text UTF-8 editor (16 KiB per note). Open and Save As use
+  file dialogs (folders, New Folder, a confirmation before overwriting).
+  Closing with unsaved changes offers Save, Don't Save and Cancel.
+* **Settings**: theme, screen resolution, keyboard layout (US or
+  US-International with dead keys: `'` then `e` gives é) and key repeat;
+  About shows the running system.
+* **Clipboard**: kept by the display server, so text copied in one app can
+  be pasted after that app has quit.
 
 With the data disk attached (the default for `make run`), **files in
 `/home` are saved to the disk and survive restarts**. Without it they are
 stored in memory and reset when Aurora restarts. The apps say which mode is
 active. `/system` is read-only.
 
-## What 0.6 is, and is not
+## What 0.7 is, and is not
 
 * User programs run in ring 3 with their own address spaces and are
-  preemptively scheduled. A crashing program is killed and nothing else is
-  affected. **The desktop and its four apps are still part of the kernel**,
-  so a bug in them can still stop the system.
+  preemptively scheduled. Since 0.7 that includes the desktop: the display
+  server and every app are processes, so a crashing app takes nothing else
+  down, and if the display server itself dies, init restarts it.
 * Programs are portable C compiled on the host (`tools/aurora_cc.py`)
   against newlib and Aurora's POSIX layer: `fork`/`exec`/`posix_spawn`,
-  pthreads, pipes, signals, `mmap`, permissions, a pty-based terminal, a
-  shell with pipelines, small utilities and Lua 5.4. Linking is static;
-  there is no compiler inside Aurora, no shared memory, no job control and
+  pthreads, pipes, signals, `mmap` (including shared memory), permissions,
+  a pty-based terminal, a shell with pipelines, small utilities and Lua 5.4.
+  Linking is static; there is no compiler inside Aurora, no job control and
   no Linux binary compatibility.
+* The desktop renders in software (one internal pixel format, damage
+  tracking); text is DejaVu via stb_truetype, Latin scripts only (no
+  shaping or right-to-left). Resolution changes work on QEMU's standard
+  VGA; one monitor; no GPU acceleration.
 * Networking covers IPv4, ICMP, UDP, DHCP, DNS and a TCP client (no
   server sockets, no congestion control, **no TLS**: `https://` is refused).
 * SMP: user programs run in parallel on all CPUs, but most kernel code
-  (system calls, files, network, the desktop) still runs under one big
-  kernel lock, so it does not scale yet. There is no AML interpreter: ACPI
-  covers power-off, the power button and reset only.
-* There is no audio, USB, user accounts, keyboard layouts other than US,
-  proportional fonts or file dialogs.
+  (system calls, files, network) still runs under one big kernel lock, so it
+  does not scale yet. There is no AML interpreter: ACPI covers power-off,
+  the power button and reset only.
+* There is no audio, USB or login.
 * It is tested on QEMU's `pc` machine with PS/2 input, the std VGA
   framebuffer and VirtIO disk/NIC only. Real hardware is untested and
   unsupported.
@@ -147,9 +158,10 @@ See [STATUS.md](STATUS.md) for the acceptance matrix with evidence and
 | `make smp` | boots at 1/2/4/8 CPUs, per-CPU work, TLB shootdown, ACPI power button, 2-minute 8-CPU stress |
 | `make stress` | the 30-minute 8-CPU stress run (0.5 acceptance) |
 | `make posix` | 0.6 acceptance: pipelines, Ctrl+C, fork x1000, signals, permissions, Lua test suite |
+| `make desktop` | 0.7 acceptance: golden screenshots, 200x150 to 1600x1000 resize, dialogs, clipboard after exit, dead keys, resolution change, killing apps and the display server |
 | `make soak` | 4-minute random input and idle soak |
 | `make check` | ELF/image consistency checks (non-PIE, higher half, W^X segments, Limine markers, no undefined symbols) |
-| `make dist` | `build/dist/aurora-os-0.6.0.zip` with source, image, kernel and docs |
+| `make dist` | `build/dist/aurora-os-0.7.0.zip` with source, image, kernel and docs |
 | `make clean` | removes `build/` only |
 
 Build variants: `release`, `test` (adds `@@` serial markers used by the

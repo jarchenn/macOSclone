@@ -39,6 +39,7 @@ struct key_event {
 struct mouse_event {
     int16_t dx, dy;  /* screen-oriented deltas (dy > 0 = down) */
     uint8_t buttons; /* bit0 left, bit1 right, bit2 middle */
+    int8_t wheel;    /* 4-byte (IntelliMouse) packets: + = scroll up */
 };
 
 struct event {

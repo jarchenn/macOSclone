@@ -51,6 +51,19 @@ bool fb_init(void)
     return true;
 }
 
+void fb_set_geometry(uint32_t width, uint32_t height, uint64_t pitch)
+{
+    g_fb.width = width;
+    g_fb.height = height;
+    g_fb.pitch = pitch;
+    g_fb.bpp = 32;
+    g_fb.size = pitch * height;
+    g_fb.rs = 16;
+    g_fb.gs = 8;
+    g_fb.bs = 0;
+    g_fb.fast_xrgb = true;
+}
+
 uint32_t fb_pack(uint32_t c)
 {
     uint32_t r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;

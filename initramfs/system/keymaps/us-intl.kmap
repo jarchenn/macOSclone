@@ -1,0 +1,107 @@
+# Aurora keymap: US-International (dead keys on ' " ` ~ ^, AltGr layer)
+# scancode (set 1, hex)  normal  shift  [altgr  [altgr+shift]]
+name US-International
+02 1 ! U+00A1 U+00B9
+03 2 @ U+00B2 -
+04 3 # U+00B3 -
+05 4 $ U+00A4 U+00A3
+06 5 % U+20AC -
+07 6 dead_circumflex U+00BC -
+08 7 & U+00BD -
+09 8 * U+00BE -
+0a 9 ( U+2018 -
+0b 0 ) U+2019 -
+0c minus _ U+00A5 -
+0d = + U+00D7 U+00F7
+10 q Q U+00E4 U+00C4
+11 w W U+00E5 U+00C5
+12 e E U+00E9 U+00C9
+13 r R U+00AE -
+14 t T U+00FE U+00DE
+15 y Y U+00FC U+00DC
+16 u U U+00FA U+00DA
+17 i I U+00ED U+00CD
+18 o O U+00F3 U+00D3
+19 p P U+00F6 U+00D6
+1a [ { U+00AB -
+1b ] } U+00BB -
+1e a A U+00E1 U+00C1
+1f s S U+00DF U+00A7
+20 d D U+00F0 U+00D0
+21 f F - -
+22 g G - -
+23 h H - -
+24 j J - -
+25 k K - -
+26 l L U+00F8 U+00D8
+27 ; : U+00B6 U+00B0
+28 dead_acute dead_diaeresis U+00B4 U+00A8
+29 dead_grave dead_tilde - -
+2b \ | U+00AC U+00A6
+2c z Z U+00E6 U+00C6
+2d x X - -
+2e c C U+00A9 U+00A2
+2f v V - -
+30 b B - -
+31 n N U+00F1 U+00D1
+32 m M U+00B5 -
+33 , < U+00E7 U+00C7
+34 . > - -
+35 / ? U+00BF -
+37 * *
+39 space space
+4a minus minus
+4e + +
+
+# dead key + letter
+compose dead_acute a U+00E1
+compose dead_acute e U+00E9
+compose dead_acute i U+00ED
+compose dead_acute o U+00F3
+compose dead_acute u U+00FA
+compose dead_acute y U+00FD
+compose dead_acute c U+00E7
+compose dead_acute A U+00C1
+compose dead_acute E U+00C9
+compose dead_acute I U+00CD
+compose dead_acute O U+00D3
+compose dead_acute U U+00DA
+compose dead_acute Y U+00DD
+compose dead_acute C U+00C7
+compose dead_grave a U+00E0
+compose dead_grave e U+00E8
+compose dead_grave i U+00EC
+compose dead_grave o U+00F2
+compose dead_grave u U+00F9
+compose dead_grave A U+00C0
+compose dead_grave E U+00C8
+compose dead_grave I U+00CC
+compose dead_grave O U+00D2
+compose dead_grave U U+00D9
+compose dead_circumflex a U+00E2
+compose dead_circumflex e U+00EA
+compose dead_circumflex i U+00EE
+compose dead_circumflex o U+00F4
+compose dead_circumflex u U+00FB
+compose dead_circumflex A U+00C2
+compose dead_circumflex E U+00CA
+compose dead_circumflex I U+00CE
+compose dead_circumflex O U+00D4
+compose dead_circumflex U U+00DB
+compose dead_tilde a U+00E3
+compose dead_tilde o U+00F5
+compose dead_tilde n U+00F1
+compose dead_tilde A U+00C3
+compose dead_tilde O U+00D5
+compose dead_tilde N U+00D1
+compose dead_diaeresis a U+00E4
+compose dead_diaeresis e U+00EB
+compose dead_diaeresis i U+00EF
+compose dead_diaeresis o U+00F6
+compose dead_diaeresis u U+00FC
+compose dead_diaeresis y U+00FF
+compose dead_diaeresis A U+00C4
+compose dead_diaeresis E U+00CB
+compose dead_diaeresis I U+00CF
+compose dead_diaeresis O U+00D6
+compose dead_diaeresis U U+00DC

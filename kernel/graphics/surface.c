@@ -396,7 +396,7 @@ int32_t draw_text_bold(struct surface *s, const struct font_data *f, int32_t x, 
     return draw_text(s, f, x, y, text, c) + 1;
 }
 
-int32_t text_width(const struct font_data *f, const char *text) { return (int32_t)strlen(text) * f->width; }
+int32_t bitmap_text_width(const struct font_data *f, const char *text) { return (int32_t)strlen(text) * f->width; }
 
 void draw_text_fit(struct surface *s, const struct font_data *f, int32_t x, int32_t y, const char *text, int32_t max_w, uint32_t c)
 {

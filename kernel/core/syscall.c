@@ -6,6 +6,17 @@
 #include "core/process.h"
 #include "core/file.h"
 #include "core/pty.h"
+#include "core/local.h"
+#include "core/power.h"
+#include "drivers/display.h"
+#include "memory/heap.h"
+#include "core/boot.h"
+#include "core/smptest.h"
+#include "arch/percpu.h"
+#include "memory/uvm.h"
+#include "drivers/input.h"
+#include "limine.h"
+#include "memory/uvm.h"
 #include "core/sched.h"
 #include "core/spinlock.h"
 #include "core/time.h"
@@ -20,7 +31,7 @@
 #include "lib.h"
 
 #ifndef AURORA_VERSION
-#define AURORA_VERSION "0.6.0"
+#define AURORA_VERSION "0.7.0"
 #endif
 
 long errno_from(long e)
@@ -76,6 +87,8 @@ long errno_from(long e)
     case AE_XDEV: return -AURORA_EXDEV;
     case AE_IO: return -AURORA_EIO;
     case AE_NOTSUP: return -AURORA_ENOTSUP;
+    case AE_BUSY: return -AURORA_EBUSY;
+    case AE_NODEV: return -AURORA_ENODEV;
     default: return -AURORA_EIO;
     }
 }
@@ -509,17 +522,65 @@ static uint8_t prot_of(uint64_t prot)
                      ((prot & AURORA_PROT_EXEC) ? VMA_X : 0));
 }
 
+static long place(struct process *p, uint64_t addr, uint64_t len, uint64_t flags, uint64_t *at)
+{
+    if (flags & AURORA_MAP_FIXED) {
+        if ((addr & (PAGE_SIZE - 1)) || addr < AURORA_USER_BASE || addr + len > AURORA_USER_LIMIT)
+            return AE_INVAL;
+        *at = addr;
+        return 0;
+    }
+    *at = mm_find_gap(&p->mm, addr ? ALIGN_UP(addr, PAGE_SIZE) : AURORA_MMAP_BASE, len);
+    return *at ? 0 : AE_NOMEM;
+}
+
+/* MAP_SHARED (0.7): a shared-memory object, or a new anonymous one (shared
+ * with children after fork). Files cannot be mapped shared. */
+static long sys_mmap_shared(struct process *p, uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags, int fd,
+                            int64_t off)
+{
+    struct shm_obj *o;
+    bool fresh = false;
+    if (flags & AURORA_MAP_ANONYMOUS) {
+        o = shm_create(len);
+        if (!o)
+            return len > SHM_MAX ? AE_INVAL : AE_NOMEM;
+        fresh = true;
+        off = 0;
+    } else {
+        struct file *f = proc_fd_get(p, fd);
+        if (!f)
+            return AE_BADF;
+        if (f->kind != FK_SHM)
+            return AE_NOTSUP;
+        o = f->shm;
+        if (off < 0 || (off & (PAGE_SIZE - 1)) || (uint64_t)off / PAGE_SIZE > o->npages ||
+            len / PAGE_SIZE > o->npages - (uint64_t)off / PAGE_SIZE)
+            return AE_INVAL;
+    }
+    uint64_t at;
+    long r = place(p, addr, len, flags, &at);
+    if (!r && mm_map_shared(&p->mm, at, len, prot_of(prot), o, (uint64_t)off / PAGE_SIZE))
+        r = AE_NOMEM;
+    if (fresh)
+        shm_put(o); /* the region holds the object now (or nothing does) */
+    return r ? r : (long)at;
+}
+
 static long sys_mmap(struct process *p, uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags, int fd,
                      int64_t off)
 {
     if (len == 0 || len > (1ull << 36))
         return AE_INVAL;
-    if (flags & AURORA_MAP_SHARED)
-        return AE_NOTSUP; /* shared memory is deferred (roadmap 0.7) */
-    if (!(flags & AURORA_MAP_PRIVATE))
-        return AE_INVAL;
     if ((prot & AURORA_PROT_WRITE) && (prot & AURORA_PROT_EXEC))
         return AE_ACCES; /* W^X for user mappings too */
+    if (flags & AURORA_MAP_SHARED) {
+        if (flags & AURORA_MAP_PRIVATE)
+            return AE_INVAL;
+        return sys_mmap_shared(p, addr, ALIGN_UP(len, PAGE_SIZE), prot, flags, fd, off);
+    }
+    if (!(flags & AURORA_MAP_PRIVATE))
+        return AE_INVAL;
     len = ALIGN_UP(len, PAGE_SIZE);
     struct file *f = NULL;
     if (!(flags & AURORA_MAP_ANONYMOUS)) {
@@ -811,6 +872,212 @@ static long do_recvfrom(int s, void *buf, uint64_t len, void *ctx)
 }
 
 /* ---- system -------------------------------------------------------------------- */
+
+/* ---- 0.7: shared memory and local sockets ------------------------------------ */
+
+static long install_new(struct process *p, struct file *f, uint64_t flags)
+{
+    if (flags & AURORA_O_NONBLOCK)
+        f->flags |= AURORA_O_NONBLOCK;
+    int fd = proc_fd_install(p, f, 0, (flags & AURORA_O_CLOEXEC) != 0);
+    if (fd < 0)
+        file_put(f);
+    return fd;
+}
+
+static long sys_shm_create(struct process *p, uint64_t size, uint64_t flags)
+{
+    int err = 0;
+    struct file *f = file_shm_create(size, &err);
+    return f ? install_new(p, f, flags) : err;
+}
+
+static long sys_socketpair(struct process *p, uint64_t ufds, uint64_t flags)
+{
+    if (!user_range_ok(p, ufds, 8, true))
+        return AE_FAULT;
+    struct file *a, *b;
+    int e = local_pair(&a, &b);
+    if (e)
+        return e;
+    long fa = install_new(p, a, flags);
+    if (fa < 0) {
+        file_put(b);
+        return fa;
+    }
+    long fb = install_new(p, b, flags);
+    if (fb < 0) {
+        proc_fd_close(p, (int)fa);
+        return fb;
+    }
+    int32_t fds[2] = { (int32_t)fa, (int32_t)fb };
+    return copy_to_user(p, ufds, fds, sizeof fds);
+}
+
+static long sys_local(struct process *p, uint64_t nr, uint64_t uname, uint64_t arg, uint64_t flags)
+{
+    char name[AURORA_LOCAL_NAME_MAX + 2];
+    int r = copy_string_from_user(p, uname, name, sizeof name);
+    if (r < 0)
+        return r;
+    struct file *f;
+    if (nr == SYS_LOCAL_LISTEN) {
+        if (p->uid != 0 && !strncmp(name, "system.", 7))
+            return AE_ACCES; /* names under "system." are for root services */
+        r = local_listen(name, (int)arg, &f);
+    } else {
+        r = local_connect(name, &f);
+        flags = arg;
+    }
+    return r ? r : install_new(p, f, flags);
+}
+
+static long sys_accept(struct process *p, int fd, uint64_t flags)
+{
+    struct file *lf = proc_fd_get(p, fd);
+    if (!lf)
+        return AE_BADF;
+    struct file *f;
+    int r = local_accept(lf, false, &f); /* blocks unless the listener is O_NONBLOCK */
+    return r ? r : install_new(p, f, flags);
+}
+
+static long sys_sendmsg(struct process *p, int fd, uint64_t umsg)
+{
+    struct file *f = proc_fd_get(p, fd);
+    if (!f)
+        return AE_BADF;
+    struct aurora_msg m;
+    if (copy_from_user(p, &m, umsg, sizeof m))
+        return AE_FAULT;
+    int32_t fds[AURORA_MSG_FDS];
+    if (m.nfds > AURORA_MSG_FDS)
+        return AE_INVAL;
+    if (m.nfds && copy_from_user(p, fds, m.fds, m.nfds * sizeof fds[0]))
+        return AE_FAULT;
+    return local_send(p, f, m.buf, m.len, fds, m.nfds, (m.flags & AURORA_MSG_DONTWAIT) != 0);
+}
+
+static long sys_recvmsg(struct process *p, int fd, uint64_t umsg)
+{
+    struct file *f = proc_fd_get(p, fd);
+    if (!f)
+        return AE_BADF;
+    struct aurora_msg m;
+    if (copy_from_user(p, &m, umsg, sizeof m))
+        return AE_FAULT;
+    uint32_t nfds = MIN(m.nfds, AURORA_MSG_FDS), flags = 0;
+    long r = local_recv(p, f, m.buf, m.len, m.fds, &nfds, &flags, (m.flags & AURORA_MSG_DONTWAIT) != 0);
+    if (r < 0)
+        return r;
+    m.nfds = nfds;
+    m.flags = flags;
+    if (copy_to_user(p, umsg, &m, sizeof m))
+        return AE_FAULT;
+    return r;
+}
+
+static long sys_test_event(struct process *p, uint64_t utext, uint64_t len)
+{
+#ifdef AURORA_TEST
+    char buf[300];
+    if (len > sizeof buf - 1)
+        len = sizeof buf - 1;
+    if (copy_from_user(p, buf, utext, len))
+        return AE_FAULT;
+    buf[len] = 0;
+    for (uint64_t i = 0; i < len; i++)
+        if (buf[i] == '\n' || buf[i] == '\r')
+            buf[i] = ' ';
+    test_event("%s", buf);
+    return 0;
+#else
+    (void)p;
+    (void)utext;
+    (void)len;
+    return AE_NOSYS;
+#endif
+}
+
+static long sys_cpuinfo(struct process *p, uint64_t u)
+{
+    static struct aurora_cpus c; /* BKL held */
+    memset(&c, 0, sizeof c);
+    c.n = MIN(g_ncpus, (uint32_t)AURORA_MAX_CPUS);
+    c.online = g_ncpus_online;
+    c.bkl_contended = bkl_contended();
+    c.lockdep_classes = lockdep_classes();
+    c.lockdep_violations = lockdep_violations();
+    c.lockdep_long_holds = lockdep_long_holds();
+    for (uint32_t i = 0; i < c.n; i++) {
+        const struct cpu *k = &g_cpus[i];
+        c.cpu[i].index = k->index;
+        c.cpu[i].apic_id = k->apic_id;
+        c.cpu[i].online = k->online;
+        c.cpu[i].ticks = k->ticks;
+        c.cpu[i].user_ticks = k->user_ticks;
+        c.cpu[i].idle_ticks = k->idle_ticks;
+        c.cpu[i].kernel_ticks = k->kernel_ticks;
+        c.cpu[i].switches = k->switches;
+        c.cpu[i].ipis = k->ipis;
+        c.cpu[i].tlb_shootdowns = k->tlb_shootdowns;
+    }
+    return copy_to_user(p, u, &c, sizeof c);
+}
+
+static long sys_proclist(struct process *p, uint64_t u)
+{
+    static struct aurora_procs l; /* BKL held */
+    memset(&l, 0, sizeof l);
+    for (int i = 0; i < MAX_PROCS && l.n < AURORA_MAX_PROCS; i++) {
+        struct process *q = process_at(i);
+        if (!q)
+            continue;
+        __typeof__(&l.p[0]) e = &l.p[l.n++];
+        e->pid = q->pid;
+        e->ppid = q->parent;
+        e->uid = q->uid;
+        e->nthreads = (uint32_t)q->nthreads;
+        e->state = q->state == PROC_ZOMBIE ? 2 : 1;
+        e->cpu_ms = process_cpu_ticks(q) * 1000 / PIT_TARGET_HZ;
+        e->mem_kib = q->state == PROC_RUNNING ? mm_resident_pages(&q->mm) * 4 : 0;
+        e->syscalls = q->syscalls;
+        str_copy(e->name, q->name, sizeof e->name);
+        str_copy(e->args, q->args, sizeof e->args);
+    }
+    l.context_switches = sched_context_switches();
+    str_copy(l.kernel_tasks, "kernel tasks:", sizeof l.kernel_tasks);
+    for (int i = 0; i < sched_task_count(); i++) {
+        struct task *t = sched_task_at(i);
+        if (t && !t->proc) {
+            str_append(l.kernel_tasks, " ", sizeof l.kernel_tasks);
+            str_append(l.kernel_tasks, t->name, sizeof l.kernel_tasks);
+        }
+    }
+    return copy_to_user(p, u, &l, sizeof l);
+}
+
+static long sys_testop(struct process *p, uint64_t op, uint64_t arg, uint64_t out)
+{
+#ifdef AURORA_TEST
+    if (op == AURORA_TESTOP_TLB) {
+        struct tlb_test_result tr;
+        memset(&tr, 0, sizeof tr);
+        int r = smp_tlb_test(arg != 0, &tr);
+        int32_t v[6] = { r, tr.unmap_cpu, tr.reader_cpu, tr.first_read_ok, tr.second_read_faulted,
+                         tr.second_value_stale };
+        long c = copy_to_user(p, out, v, sizeof v);
+        return c ? c : 0;
+    }
+    return AE_INVAL;
+#else
+    (void)p;
+    (void)op;
+    (void)arg;
+    (void)out;
+    return AE_NOSYS;
+#endif
+}
 
 static long sys_uname(struct process *p, uint64_t u)
 {
@@ -1109,6 +1376,64 @@ void syscall_dispatch(struct interrupt_frame *f)
     case SYS_UPTIME: r = (long)time_ms(); break;
     case SYS_SYSINFO: r = sys_sysinfo(p, a); break;
     case SYS_UNAME: r = sys_uname(p, a); break;
+    case SYS_SHM_CREATE: r = sys_shm_create(p, a, b); break;
+    case SYS_SOCKETPAIR: r = sys_socketpair(p, a, b); break;
+    case SYS_LOCAL_LISTEN:
+    case SYS_LOCAL_CONNECT: r = sys_local(p, nr, a, b, c); break;
+    case SYS_ACCEPT: r = sys_accept(p, (int)a, b); break;
+    case SYS_SENDMSG: r = sys_sendmsg(p, (int)a, b); break;
+    case SYS_RECVMSG: r = sys_recvmsg(p, (int)a, b); break;
+    case SYS_TEST_EVENT: r = sys_test_event(p, a, b); break;
+    case SYS_CPUINFO: r = sys_cpuinfo(p, a); break;
+    case SYS_PROCLIST: r = sys_proclist(p, a); break;
+    case SYS_TESTOP: r = p->uid == 0 ? sys_testop(p, a, b, c) : AE_PERM; break;
+    case SYS_POWER:
+        if (p->uid != 0)
+            r = AE_PERM;
+        else if (a != POWER_RESTART && a != POWER_OFF)
+            r = AE_INVAL;
+        else {
+            power_request((int)a);
+            r = 0;
+        }
+        break;
+    case SYS_KLOG: {
+        struct heap_stats hs;
+        kheap_stats(&hs);
+        struct aurora_klog k;
+        memset(&k, 0, sizeof k);
+        k.heap_used = hs.used_bytes;
+        k.heap_allocs = hs.alloc_count;
+        k.heap_mapped = hs.mapped_bytes;
+        k.display_owned = display_owned();
+        k.display_generation = display_generation();
+        struct vfs_storage stg;
+        vfs_storage(&stg);
+        struct vfs_usage u;
+        vfs_usage(&u);
+        k.vfs_generation = vfs_generation();
+        k.pfs_commits = stg.commits;
+        k.pfs_blocks_written = stg.blocks_written;
+        k.ram_bytes = u.ram_bytes;
+        k.ram_nodes = u.ram_nodes;
+        k.open_files = u.open_files;
+        k.pfs_used_blocks = stg.used_blocks;
+        k.pfs_total_blocks = stg.total_blocks;
+        k.pfs_corrupt_files = stg.corrupt_files;
+        k.pfs_last_error = stg.last_error;
+        k.home_persistent = stg.persistent;
+        k.heap_peak = hs.peak_used_bytes;
+        k.heap_limit = hs.limit_bytes;
+        k.usable_pages = pmm_state()->usable_pages;
+        k.kbd_dropped = ps2_kbd_ring()->dropped;
+        k.mouse_dropped = ps2_mouse_ring()->dropped;
+        k.sockets = (uint32_t)sock_count();
+        k.firmware = g_boot.firmware_type == LIMINE_FIRMWARE_TYPE_X86BIOS ? 1
+                     : g_boot.firmware_type == LIMINE_FIRMWARE_TYPE_EFI32  ? 3
+                                                                           : 2;
+        r = copy_to_user(p, a, &k, sizeof k);
+        break;
+    }
     default: r = AE_NOSYS; break;
     }
     r = errno_from(r);

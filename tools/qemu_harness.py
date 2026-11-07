@@ -226,6 +226,33 @@ class Guest:
         self.command("input-send-event", events=[{"type": "btn", "data": {"down": down, "button": button}}])
         time.sleep(0.03)
 
+    def mouse_wheel(self, steps):
+        """Wheel clicks: positive = up (away from the user)."""
+        button = "wheel-up" if steps > 0 else "wheel-down"
+        for _ in range(abs(steps)):
+            self.command("input-send-event", events=[{"type": "btn", "data": {"down": True, "button": button}}])
+            self.command("input-send-event", events=[{"type": "btn", "data": {"down": False, "button": button}}])
+            time.sleep(0.05)
+
+    def screendump_ppm(self, path):
+        """Raw screendump (PPM) for pixel comparisons (tools/imgdiff.py)."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.tmp / "shot.ppm"
+        if tmp.exists():
+            tmp.unlink()
+        self.command("screendump", filename=str(tmp), format="ppm")
+        deadline = time.time() + 10
+        last = -1
+        while time.time() < deadline:
+            size = tmp.stat().st_size if tmp.exists() else 0
+            if size and size == last:
+                break
+            last = size
+            time.sleep(0.1)
+        shutil.copyfile(tmp, path)
+        return path
+
     def screendump(self, path):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)

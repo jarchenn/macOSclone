@@ -7,6 +7,7 @@
 #include "arch/x86_64/io.h"
 #include "abi/aurora_abi.h"
 #include "core/panic.h"
+#include "kalloc.h"
 #include "lib.h"
 
 #define USER_TOP 0x0000800000000000ull
@@ -71,10 +72,62 @@ int mm_create(struct mm *m)
     return m->pml4 ? 0 : -1;
 }
 
+/* ---- shared-memory objects ------------------------------------------------ */
+
+struct shm_obj *shm_create(uint64_t bytes)
+{
+    if (bytes == 0 || bytes > SHM_MAX)
+        return NULL;
+    uint64_t n = ALIGN_UP(bytes, PAGE_SIZE) / PAGE_SIZE;
+    struct shm_obj *o = kzalloc(sizeof *o);
+    if (!o)
+        return NULL;
+    o->pages = kzalloc(n * sizeof(phys_addr_t));
+    if (!o->pages) {
+        kfree(o);
+        return NULL;
+    }
+    for (uint64_t i = 0; i < n; i++) {
+        o->pages[i] = pmm_alloc_page(); /* zeroed, one owner: the object */
+        if (!o->pages[i]) {
+            for (uint64_t k = 0; k < i; k++)
+                pmm_page_release(o->pages[k]);
+            kfree(o->pages);
+            kfree(o);
+            return NULL;
+        }
+    }
+    o->npages = n;
+    o->refs = 1;
+    return o;
+}
+
+void shm_ref(struct shm_obj *o) { o->refs++; }
+
+void shm_put(struct shm_obj *o)
+{
+    if (!o || --o->refs > 0)
+        return;
+    for (uint64_t i = 0; i < o->npages; i++)
+        pmm_page_release(o->pages[i]);
+    kfree(o->pages);
+    kfree(o);
+}
+
+void *shm_kptr(struct shm_obj *o, uint64_t off)
+{
+    if (!o || off >= o->npages * PAGE_SIZE)
+        return NULL;
+    return (uint8_t *)phys_to_virt(o->pages[off / PAGE_SIZE]) + (off & (PAGE_SIZE - 1));
+}
+
 void mm_destroy(struct mm *m)
 {
     if (!m->pml4)
         return;
+    for (int i = 0; i < m->nvma; i++)
+        if (m->vma[i].kind == VMA_SHARED)
+            shm_put(m->vma[i].shm);
     vmm_space_destroy(m->pml4, m->pml4_phys); /* releases shared pages by count */
     m->pml4 = NULL;
     m->pml4_phys = 0;
@@ -146,6 +199,8 @@ static int vma_insert(struct mm *m, struct vma v)
 
 static void vma_remove_at(struct mm *m, int i)
 {
+    if (m->vma[i].kind == VMA_SHARED)
+        shm_put(m->vma[i].shm); /* its pages are released by release_range */
     for (int k = i; k + 1 < m->nvma; k++)
         m->vma[k] = m->vma[k + 1];
     m->nvma--;
@@ -159,6 +214,12 @@ static int split_at(struct mm *m, uint64_t at)
         if (at > v->start && at < v->end) {
             struct vma hi = *v;
             hi.start = at;
+            if (hi.kind == VMA_SHARED) {
+                hi.pgoff += (at - v->start) / PAGE_SIZE;
+                if (m->nvma >= UVM_MAX_VMAS)
+                    return -1;
+                shm_ref(hi.shm);
+            }
             v->end = at;
             return vma_insert(m, hi);
         }
@@ -193,8 +254,25 @@ int mm_map(struct mm *m, uint64_t start, uint64_t len, uint8_t prot, uint8_t kin
     int r = mm_unmap(m, start, end - start);
     if (r)
         return r;
-    struct vma v = { start, end, prot, kind };
+    struct vma v = { start, end, prot, kind, NULL, 0 };
     return vma_insert(m, v) ? -2 : 0;
+}
+
+int mm_map_shared(struct mm *m, uint64_t start, uint64_t len, uint8_t prot, struct shm_obj *o, uint64_t pgoff)
+{
+    uint64_t end = start + ALIGN_UP(len, PAGE_SIZE);
+    if ((start & (PAGE_SIZE - 1)) || start < PAGE_SIZE || end > USER_TOP || end <= start)
+        return -1;
+    if (pgoff > o->npages || (end - start) / PAGE_SIZE > o->npages - pgoff)
+        return -1;
+    int r = mm_unmap(m, start, end - start);
+    if (r)
+        return r;
+    struct vma v = { start, end, prot, VMA_SHARED, o, pgoff };
+    if (vma_insert(m, v))
+        return -2;
+    shm_ref(o);
+    return 0;
 }
 
 int mm_protect(struct mm *m, uint64_t start, uint64_t len, uint8_t prot)
@@ -219,7 +297,9 @@ int mm_protect(struct mm *m, uint64_t start, uint64_t len, uint8_t prot)
         if (!pte || !(*pte & PTE_P))
             continue;
         phys_addr_t pa = *pte & PTE_ADDR;
-        *pte = pa | leaf_flags(prot, pmm_page_owners(pa) == 1);
+        struct vma *v = mm_find(m, va);
+        bool shared = v && v->kind == VMA_SHARED;
+        *pte = pa | leaf_flags(prot, shared || pmm_page_owners(pa) == 1);
     }
     flush_range(m, start, (end - start) / PAGE_SIZE);
     return 0;
@@ -246,6 +326,9 @@ int mm_clone(struct mm *dst, struct mm *src)
         return -1;
     memcpy(dst->vma, src->vma, sizeof src->vma);
     dst->nvma = src->nvma;
+    for (int i = 0; i < dst->nvma; i++)
+        if (dst->vma[i].kind == VMA_SHARED)
+            shm_ref(dst->vma[i].shm); /* mm_destroy below drops them on failure */
     dst->brk_base = src->brk_base;
     dst->brk = src->brk;
     for (unsigned i3 = 0; i3 < 256; i3++) {
@@ -271,7 +354,9 @@ int mm_clone(struct mm *dst, struct mm *src)
                         flush_range(src, 0, ~0ull >> 12);
                         return -1;
                     }
-                    spt[i0] &= ~PTE_W; /* both copies are read-only until written */
+                    const struct vma *sv = mm_find(src, va);
+                    if (!sv || sv->kind != VMA_SHARED)
+                        spt[i0] &= ~PTE_W; /* both copies are read-only until written */
                     *d = spt[i0];
                     pmm_page_share(spt[i0] & PTE_ADDR);
                 }
@@ -296,6 +381,21 @@ int mm_fault(struct mm *m, uint64_t addr, bool write, bool exec)
     if (!pte)
         return -1; /* out of memory for page tables */
     m->faults++;
+    if (v->kind == VMA_SHARED) {
+        if (!(*pte & PTE_P)) {
+            uint64_t pg = v->pgoff + (va - v->start) / PAGE_SIZE;
+            if (pg >= v->shm->npages)
+                return -1;
+            phys_addr_t pa = v->shm->pages[pg];
+            pmm_page_share(pa);
+            *pte = pa | leaf_flags(v->prot, true);
+        } else {
+            *pte = (*pte & PTE_ADDR) | leaf_flags(v->prot, true);
+        }
+        if (is_loaded(m))
+            invlpg(va);
+        return 0;
+    }
     if (!(*pte & PTE_P)) {
         phys_addr_t pa = pmm_alloc_page(); /* zeroed */
         if (!pa)
@@ -364,6 +464,8 @@ void *mm_populate(struct mm *m, uint64_t va)
     if (!pte)
         return NULL;
     if (!(*pte & PTE_P)) {
+        if (v->kind == VMA_SHARED)
+            return NULL; /* the loader never writes into shared regions */
         phys_addr_t pa = pmm_alloc_page();
         if (!pa)
             return NULL;
@@ -390,7 +492,7 @@ uint64_t mm_brk(struct mm *m, uint64_t want)
         if (h) {
             h->end = new_end;
         } else {
-            struct vma v = { m->brk_base, new_end, VMA_R | VMA_W, VMA_HEAP };
+            struct vma v = { m->brk_base, new_end, VMA_R | VMA_W, VMA_HEAP, NULL, 0 };
             if (vma_insert(m, v))
                 return m->brk;
         }

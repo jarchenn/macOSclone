@@ -28,5 +28,7 @@ void fb_fill_rect(struct rect r, uint32_t xrgb);
 /* Copies rect r of a screen-sized XRGB8888 surface to the framebuffer,
  * converting the pixel format. */
 void fb_present(const struct surface *src, struct rect r);
+/* After a mode change (drivers/display.c): new 32-bpp XRGB geometry. */
+void fb_set_geometry(uint32_t width, uint32_t height, uint64_t pitch);
 
 #endif

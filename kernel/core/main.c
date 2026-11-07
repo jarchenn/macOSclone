@@ -20,12 +20,14 @@
 #include "core/spinlock.h"
 #include "net/net.h"
 #include "drivers/pci.h"
+#include "drivers/display.h"
 #include "drivers/blk.h"
 #include "drivers/acpi.h"
 #include "drivers/apic.h"
 #include "arch/smp.h"
 #include "memory/tlb.h"
-#include "desktop/desktop.h"
+#include "core/power.h"
+#include "lib/inflate.h"
 #include "lib.h"
 void panic_halt_ipi(void);
 #include "limine.h"
@@ -169,14 +171,39 @@ static NORETURN void kmain_stage2(void)
     if (!initrd) {
         klog("vfs: warning: no initramfs module; /system will be empty");
     } else {
-        int r = vfs_load_initramfs(phys_to_virt(initrd->phys), initrd->size);
+        const uint8_t *data = phys_to_virt(initrd->phys);
+        uint64_t size = initrd->size;
+        /* 0.7: "AZIP" + 64-bit size + zlib stream (tools/build.py); the
+         * bootloader then has less to load (the fonts made it too big for
+         * Limine at 128 MiB). The inflated copy stays for the kernel's
+         * lifetime: /system's nodes point into it. */
+        if (size > 12 && !memcmp(data, "AZIP", 4)) {
+            uint64_t want;
+            memcpy(&want, data + 4, 8);
+            phys_addr_t pa = want && want < (256ull << 20) ? pmm_alloc_contig(ALIGN_UP(want, PAGE_SIZE) / PAGE_SIZE) : 0;
+            size_t got = 0;
+            uint64_t zt0 = time_ms();
+            int zr = pa ? zlib_inflate(data + 12, size - 12, phys_to_virt(pa), want, &got) : INFLATE_EFULL;
+            if (zr != INFLATE_OK || got != want) {
+                klog("vfs: initramfs could not be inflated (error %d, %zu of %llu bytes)", zr, got,
+                     (unsigned long long)want);
+                size = 0;
+            } else {
+                klog("vfs: initramfs inflated %llu -> %llu bytes in %llu ms", (unsigned long long)size,
+                     (unsigned long long)want, (unsigned long long)(time_ms() - zt0));
+                data = phys_to_virt(pa);
+                size = want;
+            }
+        }
+        int r = size ? vfs_load_initramfs(data, size) : VFS_EBADARCHIVE;
         if (r != VFS_OK)
             klog("vfs: warning: initramfs rejected (%s); /system may be incomplete", vfs_strerror(r));
         else
             klog("vfs: initramfs %s (%llu bytes) mounted at /system, seeded /home", initrd->path,
-                 (unsigned long long)initrd->size);
+                 (unsigned long long)size);
     }
     pci_init();
+    display_init();
     if (vblk_init()) {
         bool formatted = false;
         int pr = vfs_attach_persistent(vblk_blockdev(), &formatted);
@@ -195,6 +222,7 @@ static NORETURN void kmain_stage2(void)
     process_start_init();
 
     klog("AURORA_BOOT_OK");
-    desktop_main();
-    panic("desktop_main returned");
+    /* 0.7: the desktop is a user process (/system/bin/display, started by
+     * init). Task 0 stays in the kernel and serves power requests. */
+    power_main();
 }

@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -31,7 +32,7 @@ import userland  # noqa: E402
 
 ROOT = env.ROOT
 BUILD = env.BUILD
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 
 VARIANTS = {
     "release": [],
@@ -58,6 +59,7 @@ HOST_TEST_SOURCES = [
     "kernel/lib/format.c",
     "kernel/lib/string.c",
     "kernel/lib/crc32.c",
+    "kernel/lib/inflate.c",
     "kernel/graphics/rect.c",
     "kernel/drivers/kbd_decode.c",
     "kernel/drivers/mouse_decode.c",
@@ -66,8 +68,8 @@ HOST_TEST_SOURCES = [
     "kernel/fs/vfs.c",
     "kernel/fs/ramfs.c",
     "kernel/fs/initramfs.c",
-    "kernel/apps/cmdline.c",
-    "kernel/apps/textbuf.c",
+    "user/gui/apps/terminal/cmdline.c",
+    "user/gui/lib/textbuf.c",
     "kernel/memory/heap.c",
     "kernel/memory/physical.c",
     "kernel/core/elf.c",
@@ -211,14 +213,63 @@ def build_user(variant: str) -> dict:
         out[src.stem] = elf
     for name, elf in userland.build_ports(variant).items():
         out[name] = elf
+    out.update(build_gui(variant, cc, flags, udir, force))
+    return out
+
+
+# 0.7 desktop: the display server and the apps, all user processes. They
+# share the portable drawing code with the kernel (kernel/graphics, built in
+# AURORA_HOST mode against newlib) and the generated bitmap fonts.
+GUI_SHARED = ["kernel/graphics/rect.c", "kernel/graphics/surface.c", "kernel/lib/format.c", "kernel/fs/path.c",
+              "kernel/lib/string.c"]
+GUI_APPS = ["terminal", "notes", "files", "settings", "welcome"]
+
+
+def build_gui(variant: str, cc, base_flags, udir: Path, force: bool) -> dict:
+    gdir = udir / "gui"
+    objdir = gdir / "obj"
+    gen = BUILD / variant / "gen"
+    asset_c = generate(gen)
+    stb = fetch_deps.file_dir("stb_truetype")
+    flags = base_flags + ["-DAURORA_HOST=1", "-DAURORA_GUI=1", "-I", str(ROOT / "user/gui/include"),
+                          "-I", str(ROOT / "kernel/include"), "-I", str(gen), "-I", str(stb)]
+    if variant == "test":
+        flags.append("-DAURORA_TEST=1")
+    stamp = gdir / "flags.txt"
+    line = " ".join(flags)
+    force = force or not stamp.exists() or stamp.read_text() != line
+    gdir.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(line)
+
+    def objs(paths):
+        return [compile_obj(cc, flags, p, objdir, force) for p in paths]
+
+    common = objs([ROOT / p for p in GUI_SHARED] + [asset_c] + sorted((ROOT / "user/gui/common").glob("*.c")))
+    lib = objs(sorted((ROOT / "user/gui/lib").glob("*.c")))
+    script = ROOT / "user/linker.ld"
+    libs = [userland.SYSROOT / "lib" / n for n in ("crt0.o", "libaurora.a", "libc.a", "libm.a")]
+    progs = {"display": objs(sorted((ROOT / "user/gui/server").glob("*.c"))) + common}
+    for app in GUI_APPS:
+        progs[app] = objs(sorted((ROOT / "user/gui/apps" / app).glob("*.c"))) + lib + common
+    out = {}
+    for name, o in progs.items():
+        elf = gdir / name
+        deps = o + [script] + libs
+        if not elf.exists() or any(d.stat().st_mtime > elf.stat().st_mtime for d in deps):
+            print(f"  ULD {rel(elf)}")
+            userland.link_program(o, elf, script)
+        out[name] = elf
     return out
 
 
 def build_initramfs(variant: str, programs: dict) -> Path:
     out = BUILD / variant / "initramfs.img"
     extra = {f"system/bin/{name}": path.read_bytes() for name, path in programs.items()}
-    extra.update(userland.port_data())
-    data = make_initramfs.pack(ROOT / "initramfs", extra)
+    extra.update(userland.port_data(with_tests=(variant == "test")))
+    raw = make_initramfs.pack(ROOT / "initramfs", extra)
+    # 0.7: compressed ("AZIP", 64-bit size, zlib stream), inflated by the
+    # kernel at boot (kernel/lib/inflate.c).
+    data = b"AZIP" + struct.pack("<Q", len(raw)) + zlib.compress(raw, 9)
     if not out.exists() or out.read_bytes() != data:
         print(f"  FS  {rel(out)}")
         out.write_bytes(data)
@@ -296,7 +347,8 @@ def cmd_test(args):
     common = [str(ROOT / s) for s in HOST_TEST_SOURCES]
     flags = ["-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Wno-unused-parameter", "-DAURORA_HOST=1",
              '-DAURORA_VERSION="host"', '-DAURORA_BUILD_ID="host"', '-DAURORA_VARIANT="host"',
-             "-I" + str(ROOT / "kernel/include"), "-I" + str(ROOT / "kernel"), "-I" + str(ROOT / "tests/host")]
+             "-I" + str(ROOT / "kernel/include"), "-I" + str(ROOT / "kernel"), "-I" + str(ROOT / "tests/host"),
+             "-I" + str(ROOT / "user/gui/include")]
     san = ["-fsanitize=address,undefined", "-fno-sanitize-recover=undefined", "-fno-omit-frame-pointer"]
     probe = out / "probe.c"
     probe.write_text("int main(void){return 0;}\n")
@@ -399,7 +451,8 @@ def cmd_check(args):
             check(False, f"{rel(img_path)} exists")
         # 0.6: every user program is a static non-PIE executable with W^X
         # segments and (when it has thread-local data) one PT_TLS header.
-        progs = sorted(p for p in (BUILD / v / "user").iterdir() if p.is_file() and p.suffix == "")
+        progs = sorted(p for d in (BUILD / v / "user", BUILD / v / "user" / "gui") if d.exists()
+                       for p in d.iterdir() if p.is_file() and p.suffix == "")
         bad = []
         for p in progs:
             u = parse_elf(p)
@@ -452,6 +505,7 @@ HELP = """Aurora OS 0.1 - make targets
   make storage      persistent /home: reboot, power loss, crash-consistency stress
   make network      DHCP, ping, DNS, UDP, TCP and HTTP against host-side test servers
   make posix        0.6 POSIX userland acceptance tests (pipelines, signals, fork, Lua test suite)
+  make desktop      0.7 desktop acceptance tests (golden screenshots, resize, dialogs, clipboard, keymaps)
   make soak         4-minute random input + idle soak test
   make check        image and linkage consistency checks
   make clean        remove build/ only

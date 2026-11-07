@@ -48,7 +48,7 @@ void blit_round_bottom(struct surface *dst, const struct surface *src, int32_t d
 int32_t draw_text(struct surface *s, const struct font_data *f, int32_t x, int32_t y, const char *text, uint32_t c);
 int32_t draw_text_n(struct surface *s, const struct font_data *f, int32_t x, int32_t y, const char *text, size_t n, uint32_t c);
 int32_t draw_text_bold(struct surface *s, const struct font_data *f, int32_t x, int32_t y, const char *text, uint32_t c);
-int32_t text_width(const struct font_data *f, const char *text);
+int32_t bitmap_text_width(const struct font_data *f, const char *text);
 /* Draws text truncated with "..." to fit max_w pixels. */
 void draw_text_fit(struct surface *s, const struct font_data *f, int32_t x, int32_t y, const char *text, int32_t max_w, uint32_t c);
 

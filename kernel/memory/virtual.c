@@ -267,6 +267,20 @@ void vmm_test_page_unmap(bool shootdown)
      * still reach it through a stale TLB entry */
 }
 
+bool vmm_map_framebuffer(phys_addr_t pa, size_t bytes)
+{
+    uint64_t cache = g_vmm.fb_write_combining ? (PTE_PAT4K | PTE_PWT) : (PTE_PCD | PTE_PWT);
+    uint64_t base = ALIGN_DOWN(pa, PAGE_SIZE), end = ALIGN_UP(pa + bytes, PAGE_SIZE);
+    uint64_t f = spin_lock_irqsave(&vmm_lock);
+    for (uint64_t p = base; p < end; p += PAGE_SIZE)
+        if (!paging_map_4k(kernel_pml4, p + g_boot.hhdm_offset, p, PTE_W | PTE_NX | cache)) {
+            spin_unlock_irqrestore(&vmm_lock, f);
+            return false;
+        }
+    spin_unlock_irqrestore(&vmm_lock, f);
+    return true;
+}
+
 /* MMIO window: a bump allocator above the LAPIC page. Mappings are never
  * removed (device registers stay mapped for the kernel's lifetime). The
  * same physical page is only mapped once. */

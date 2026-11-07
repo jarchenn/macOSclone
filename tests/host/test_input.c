@@ -256,8 +256,57 @@ TEST(event_queue_policy)
     CHECK_EQ(q.count, 2);
 }
 
+/* 0.7: raw scan codes for /dev/input. */
+TEST(scanner_codes)
+{
+    struct kbd_scanner s;
+    kbd_scanner_init(&s);
+    uint16_t code = 0;
+    bool down = false;
+    CHECK(kbd_scan(&s, 0x1E, &code, &down)); /* A pressed */
+    CHECK_EQ(code, 0x1E);
+    CHECK(down);
+    CHECK(kbd_scan(&s, 0x9E, &code, &down)); /* A released */
+    CHECK_EQ(code, 0x1E);
+    CHECK(!down);
+    CHECK(!kbd_scan(&s, 0xE0, &code, &down)); /* right Alt: E0 38 */
+    CHECK(kbd_scan(&s, 0x38, &code, &down));
+    CHECK_EQ(code, 0x138);
+    CHECK(down);
+    CHECK(!kbd_scan(&s, 0xE0, &code, &down)); /* fake shift around PrtSc */
+    CHECK(!kbd_scan(&s, 0x2A, &code, &down));
+    CHECK(!kbd_scan(&s, 0xFA, &code, &down)); /* ACK */
+    static const uint8_t pause[] = { 0xE1, 0x1D, 0x45, 0xE1, 0x9D, 0xC5 };
+    for (size_t i = 0; i < sizeof pause; i++)
+        CHECK(!kbd_scan(&s, pause[i], &code, &down));
+    CHECK(kbd_scan(&s, 0x10, &code, &down)); /* Q after Pause is intact */
+    CHECK_EQ(code, 0x10);
+}
+
+TEST(mouse_wheel_packets)
+{
+    struct mouse_decoder m;
+    mouse_decoder_init(&m);
+    m.size = 4;
+    struct mouse_event e;
+    CHECK(!mouse_decode(&m, 0x08, 0, &e));
+    CHECK(!mouse_decode(&m, 0x00, 0, &e));
+    CHECK(!mouse_decode(&m, 0x00, 0, &e));
+    CHECK(mouse_decode(&m, 0x0F, 0, &e)); /* z = -1: wheel away = up */
+    CHECK_EQ(e.wheel, 1);
+    CHECK(!mouse_decode(&m, 0x09, 1, &e));
+    CHECK(!mouse_decode(&m, 0x05, 1, &e));
+    CHECK(!mouse_decode(&m, 0x00, 1, &e));
+    CHECK(mouse_decode(&m, 0x02, 1, &e)); /* z = +2: down */
+    CHECK_EQ(e.wheel, -2);
+    CHECK_EQ(e.dx, 5);
+    CHECK_EQ(e.buttons, 1);
+}
+
 void run_tests(void)
 {
+    RUN(scanner_codes);
+    RUN(mouse_wheel_packets);
     RUN(plain_and_shift);
     RUN(shifted_symbols);
     RUN(caps_lock_toggle_once_per_press);

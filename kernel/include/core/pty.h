@@ -20,6 +20,8 @@
 struct pty_master {
     void (*output)(void *ctx, const char *data, size_t len);
     void *ctx;
+    /* Optional: bytes the master can take now; slave writes wait for room. */
+    size_t (*room)(void *ctx);
 };
 
 struct pty {
@@ -55,5 +57,17 @@ long pty_read(struct process *p, struct pty *t, uint64_t ubuf, uint64_t len, boo
 long pty_write(struct process *p, struct pty *t, uint64_t ubuf, uint64_t len);
 long pty_ioctl(struct process *p, struct pty *t, uint64_t req, uint64_t arg);
 int pty_poll(struct pty *t, int events);
+
+/* User-space masters (/dev/ptmx, 0.7): the master is an open file whose
+ * reads return program output (buffered, PTM_OUT_CAP bytes) and whose
+ * writes go through the line discipline as typed input. */
+#define PTM_OUT_CAP 16384u
+struct file;
+struct file *ptm_open(int *err);
+long ptm_read(struct process *p, struct file *f, uint64_t ubuf, uint64_t len);
+long ptm_write(struct process *p, struct file *f, uint64_t ubuf, uint64_t len);
+long ptm_ioctl(struct process *p, struct file *f, uint64_t req, uint64_t arg);
+int ptm_poll(struct file *f, int events);
+void ptm_close(struct file *f);
 
 #endif

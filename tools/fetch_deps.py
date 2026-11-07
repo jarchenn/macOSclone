@@ -112,7 +112,58 @@ SOURCES = {
         "digest": "7d971845f545ffc09fbb3128a86b2c6524161c70d0fdf0154a16e8c00c343fca",
         "top": "lua-5.4.9-tests",
     },
+    # DejaVu fonts (0.7): no digest is published next to the release, so the
+    # SHA-256 is the one of the archive downloaded and inspected on
+    # 2026-11-06 (see DEPENDENCIES.md).
+    "dejavu": {
+        "version": "2.37",
+        "url": "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/"
+               "dejavu-fonts-ttf-2.37.tar.bz2",
+        "algo": "sha256",
+        "digest": "fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7",
+        "top": "dejavu-fonts-ttf-2.37",
+    },
 }
+
+# Single files pinned to a commit (0.7). stb has no releases; the commit is
+# the last one touching stb_truetype.h (v1.26) and the digest is that of the
+# file at that commit, downloaded and inspected on 2026-11-06.
+FILES = {
+    "stb_truetype": {
+        "version": "1.26-6e9f34d",
+        "url": "https://raw.githubusercontent.com/nothings/stb/6e9f34d5429cf16790ec43c9bac3f1ee4ad1f760/"
+               "stb_truetype.h",
+        "algo": "sha256",
+        "digest": "ecd30b05e0dd4fea3a13c26810dd9e1992dc379049482c393d5a19e6b5090aab",
+        "name": "stb_truetype.h",
+    },
+}
+
+
+def file_dir(name: str) -> Path:
+    s = FILES[name]
+    return THIRD_PARTY / f"{name}-{s['version']}"
+
+
+def fetch_file(name: str) -> None:
+    s = FILES[name]
+    dest = file_dir(name)
+    stamp = dest / ".verified"
+    if stamp.exists() and stamp.read_text().strip() == s["digest"] and (dest / s["name"]).exists():
+        print(f"{name} {s['version']}: already present in {dest.relative_to(ROOT)}")
+        return
+    print(f"{name} {s['version']}: downloading {s['url']}")
+    try:
+        data = fetch(s["url"])
+    except Exception as exc:
+        sys.exit(f"error: could not download {name}: {exc}")
+    digest = hashlib.new(s["algo"], data).hexdigest()
+    if digest != s["digest"]:
+        sys.exit(f"error: {name} {s['algo']} mismatch: got {digest}, expected {s['digest']}")
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / s["name"]).write_bytes(data)
+    stamp.write_text(s["digest"] + "\n")
+    print(f"{name} {s['version']}: verified {s['algo']} {digest[:16]}...")
 
 
 def source_dir(name: str) -> Path:
@@ -166,6 +217,8 @@ def main() -> int:
     fetch_limine()
     for name in SOURCES:
         fetch_source(name)
+    for name in FILES:
+        fetch_file(name)
     return 0
 
 
